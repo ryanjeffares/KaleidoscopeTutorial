@@ -17,10 +17,10 @@ namespace kaleidoscope
 			TOK_NUM = -5
 		};
 
-		Lexer() = default;
+		Lexer() : lastChar(' ') {}
 		~Lexer() = default;
 
-		int getToken();
+	    int getToken();
 
         double getNumValue() const { return numValue; }
 
@@ -28,6 +28,7 @@ namespace kaleidoscope
 
 	private:
         
+		int lastChar;
 		double numValue;
 		std::string identifierStr;
 	};

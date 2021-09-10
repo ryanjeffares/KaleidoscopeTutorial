@@ -5,14 +5,14 @@ using namespace kaleidoscope::parser::ast;
 
 // =================== AST ===================
 
-llvm::Value* NumberExprAST::codeGen()
+llvm::Value* NumberExprAST::codeGen(LLVMModule& llvmModule)
 {
-    return llvm::ConstantFP::get(*llvmContext, llvm::APFloat(value));
+    return llvm::ConstantFP::get(*(llvmModule.llvmContext), llvm::APFloat(value));
 }
 
-llvm::Value* VariableExprAST::codeGen()
+llvm::Value* VariableExprAST::codeGen(LLVMModule& llvmModule)
 {
-    auto v = namedValues[name];
+    auto v = llvmModule.namedValues[name];
     if (!v)
     {
         logging::logErrorValue("Unknown variable name.");                        
@@ -20,10 +20,10 @@ llvm::Value* VariableExprAST::codeGen()
     return v;
 } 
 
-llvm::Value* BinaryExprAST::codeGen() 
+llvm::Value* BinaryExprAST::codeGen(LLVMModule& llvmModule) 
 {
-    auto l = lhs->codeGen();
-    auto r = rhs->codeGen();
+    auto l = lhs->codeGen(llvmModule);
+    auto r = rhs->codeGen(llvmModule);
 
     if (!l || !r)
     {
@@ -33,26 +33,26 @@ llvm::Value* BinaryExprAST::codeGen()
     switch (op)
     {
         case '+':
-            return irBuilder->CreateFAdd(l, r, "addtmp");                        
+            return llvmModule.irBuilder->CreateFAdd(l, r, "addtmp");                        
         case '-':
-            return irBuilder->CreateFSub(l, r, "subtmp");
+            return llvmModule.irBuilder->CreateFSub(l, r, "subtmp");
         case '/':
-            return irBuilder->CreateFDiv(l, r, "divtmp");
+            return llvmModule.irBuilder->CreateFDiv(l, r, "divtmp");
         case '*':
-            return irBuilder->CreateFMul(l, r, "multmp");
+            return llvmModule.irBuilder->CreateFMul(l, r, "multmp");
         case '<':
-            l = irBuilder->CreateFCmpULT(l, r, "cmptmp");
+            l = llvmModule.irBuilder->CreateFCmpULT(l, r, "cmptmp");
             // convert bool 0/1 to double 0.0/1.0
-            return irBuilder->CreateUIToFP(l, llvm::Type::getDoubleTy(*llvmContext), "booltmp");
+            return llvmModule.irBuilder->CreateUIToFP(l, llvm::Type::getDoubleTy(*(llvmModule.llvmContext)), "booltmp");
         default:
             logging::logErrorValue("Invalid binary operator.");
             return nullptr;                            
     }
 }
 
-llvm::Value* CallExprAST::codeGen()
+llvm::Value* CallExprAST::codeGen(LLVMModule& llvmModule)
 {
-    auto calleeFunc = llvmModule->getFunction(callee);
+    auto calleeFunc = llvmModule.llvmModule->getFunction(callee);
     if (!calleeFunc)
     {
         logging::logErrorValue("Unknown function referenced.");
@@ -68,21 +68,21 @@ llvm::Value* CallExprAST::codeGen()
     std::vector<llvm::Value*> argsVec;
     for (unsigned i = 0, e = args.size(); i != e; ++i)
     {
-        argsVec.push_back(args[i]->codeGen());
+        argsVec.push_back(args[i]->codeGen(llvmModule));
         if (!argsVec.back())
         {
             return nullptr;
         }
     }
 
-    return irBuilder->CreateCall(calleeFunc, argsVec, "calltmp");
+    return llvmModule.irBuilder->CreateCall(calleeFunc, argsVec, "calltmp");
 }
 
-llvm::Function* PrototypeAST::codeGen()
+llvm::Function* PrototypeAST::codeGen(LLVMModule& llvmModule)
 {
-    std::vector<llvm::Type*> doubles(args.size(), llvm::Type::getDoubleTy(*llvmContext));
-    auto fType = llvm::FunctionType::get(llvm::Type::getDoubleTy(*llvmContext), doubles, false);
-    auto func = llvm::Function::Create(fType, llvm::Function::ExternalLinkage, name, llvmModule.get());
+    std::vector<llvm::Type*> doubles(args.size(), llvm::Type::getDoubleTy(*(llvmModule.llvmContext)));
+    auto fType = llvm::FunctionType::get(llvm::Type::getDoubleTy(*(llvmModule.llvmContext)), doubles, false);
+    auto func = llvm::Function::Create(fType, llvm::Function::ExternalLinkage, name, llvmModule.llvmModule.get());
 
     unsigned index = 0;
     for (auto& arg : func->args())
@@ -93,14 +93,14 @@ llvm::Function* PrototypeAST::codeGen()
     return func;
 }
 
-llvm::Function* FunctionAST::codeGen()
+llvm::Function* FunctionAST::codeGen(LLVMModule& llvmModule)
 {
     // first check for existing function from a previous extern declaration
-    auto func = llvmModule->getFunction(proto->getName());
+    auto func = llvmModule.llvmModule->getFunction(proto->getName());
 
     if (!func)
     {
-        func = proto->codeGen();
+        func = proto->codeGen(llvmModule);
     }
 
     if (!func)
@@ -115,20 +115,20 @@ llvm::Function* FunctionAST::codeGen()
     // }
 
     // create a new basic block to start insertion into
-    auto block = llvm::BasicBlock::Create(*llvmContext, "entry", func);
-    irBuilder->SetInsertPoint(block);
+    auto block = llvm::BasicBlock::Create(*(llvmModule.llvmContext), "entry", func);
+    llvmModule.irBuilder->SetInsertPoint(block);
 
     // clear the map and record the function arguments there
-    namedValues.clear();
+    llvmModule.namedValues.clear();
     for (auto& arg : func->args())
     {
-        namedValues[std::string(arg.getName())] = &arg;
+        llvmModule.namedValues[std::string(arg.getName())] = &arg;
     }
 
-    if (auto returnValue = body->codeGen())
+    if (auto returnValue = body->codeGen(llvmModule))
     {
         // finish off the function and validate it
-        irBuilder->CreateRet(returnValue);
+        llvmModule.irBuilder->CreateRet(returnValue);
         llvm::verifyFunction(*func);
         return func;
     }
@@ -151,8 +151,7 @@ Parser::Parser()
 
 void Parser::run()
 {
-    getNextToken();
-    initialiseModule();
+    getNextToken();    
     mainLoop();
 }
 
@@ -181,18 +180,11 @@ void Parser::mainLoop()
     }
 }
 
-void Parser::initialiseModule()
-{
-    ast::llvmContext = std::make_unique<llvm::LLVMContext>();
-    ast::llvmModule = std::make_unique<llvm::Module>("Kaleidoscope JIT", *(ast::llvmContext));
-    ast::irBuilder = std::make_unique<llvm::IRBuilder<>>(*(ast::llvmContext));
-}
-
 void Parser::handleDefinition()
 {
     if (auto funcAst = parseDefinition())
     {
-        if (auto funcIr = funcAst->codeGen())
+        if (auto funcIr = funcAst->codeGen(llvmModule))
         {
             fprintf(stderr, "Read function definition: \n");
             funcIr->print(llvm::errs());
@@ -209,7 +201,7 @@ void Parser::handleExtern()
 {
     if (auto funcAst = parseExtern())
     {
-        if (auto funcIr = funcAst->codeGen())
+        if (auto funcIr = funcAst->codeGen(llvmModule))
         {
             fprintf(stderr, "Read extern: \n");
             funcIr->print(llvm::errs());
@@ -226,7 +218,7 @@ void Parser::handleTopLevelExpression()
 {
     if (auto funcAst = parseTopLevelExpr())
     {
-        if (auto funcIr = funcAst->codeGen())
+        if (auto funcIr = funcAst->codeGen(llvmModule))
         {
             fprintf(stderr, "Read a top level expression: \n");
             funcIr->print(llvm::errs());

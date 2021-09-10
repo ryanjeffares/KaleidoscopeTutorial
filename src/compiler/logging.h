@@ -15,21 +15,20 @@ namespace kaleidoscope
 
             // simple error handlers
             static void logError(const char* str, LogType type)
-            {
-                const char* typeMessage;
+            {                
                 switch (type)
                 {
-                    case LogType::Token:
-                        typeMessage = "Token";
+                    case LogType::Token:                        
+                        fprintf(stderr, "Error of type Token: ");
                         break;
                     case LogType::Proto:
-                        typeMessage = "Prototype";
+                        fprintf(stderr, "Error of type Prototype: ");
                         break;
                     case LogType::Value:
-                        typeMessage = "Value";
+                        fprintf(stderr, "Error of type Value: ");
                         break;
                 }
-                fprintf(stderr, "Error of type %s: %s\n", typeMessage, str);                
+                fprintf(stderr, "%s\n", str);                
             }
         } // namespace private            
         

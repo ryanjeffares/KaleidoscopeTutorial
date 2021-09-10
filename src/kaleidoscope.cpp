@@ -3,7 +3,7 @@
 int main()
 {
     kaleidoscope::parser::Parser parser;
-    fprintf(stderr, "ready> ");
+    fprintf(stderr, "ready> ");    
     parser.run();
-    kaleidoscope::parser::ast::llvmModule->print(llvm::errs(), nullptr);
+    parser.printJitCode();
 }

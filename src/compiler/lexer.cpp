@@ -3,8 +3,7 @@
 using namespace kaleidoscope;
 
 int Lexer::getToken()
-{            
-    static int lastChar = ' ';
+{                
     // skip whitespace
     while (isspace(lastChar))
     {

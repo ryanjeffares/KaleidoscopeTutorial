@@ -14,18 +14,28 @@ namespace kaleidoscope
 	namespace parser 
 	{
         namespace ast
-        {
-            static std::unique_ptr<llvm::LLVMContext> llvmContext;
-            static std::unique_ptr<llvm::IRBuilder<>> irBuilder;
-            static std::unique_ptr<llvm::Module> llvmModule;
-            static std::map<std::string, llvm::Value*> namedValues;
+        {        
+            struct LLVMModule
+            {
+                std::shared_ptr<llvm::LLVMContext> llvmContext;
+                std::shared_ptr<llvm::IRBuilder<>> irBuilder;
+                std::shared_ptr<llvm::Module> llvmModule;
+                std::map<std::string, llvm::Value*> namedValues;
+
+                LLVMModule()
+                {
+                    llvmContext = std::make_shared<llvm::LLVMContext>();
+                    llvmModule = std::make_shared<llvm::Module>("Kaleidoscope JIT", *llvmContext);
+                    irBuilder = std::make_shared<llvm::IRBuilder<>>(*llvmContext);
+                }
+            };
 
             // base class for all expression nodes
             class ExprAST
             {
             public:
                 virtual ~ExprAST() = default;
-                virtual llvm::Value* codeGen() = 0;
+                virtual llvm::Value* codeGen(LLVMModule&) = 0;
             };
 
             // expression class for numerical literals
@@ -34,7 +44,7 @@ namespace kaleidoscope
             public:
                 NumberExprAST(double v) : value(v) {}
 
-                llvm::Value* codeGen() override;
+                llvm::Value* codeGen(LLVMModule&) override;
 
             private:
                 double value;
@@ -46,7 +56,7 @@ namespace kaleidoscope
             public:
                 VariableExprAST(const std::string& n) : name(n) {}
 
-                llvm::Value* codeGen() override;  
+                llvm::Value* codeGen(LLVMModule&) override;  
 
             private:
                 std::string name;
@@ -59,7 +69,7 @@ namespace kaleidoscope
                 BinaryExprAST(char o, std::unique_ptr<ExprAST> l, std::unique_ptr<ExprAST> r)
                     : op(o), lhs(std::move(l)), rhs(std::move(r)) {}
 
-                llvm::Value* codeGen() override;
+                llvm::Value* codeGen(LLVMModule&) override;
 
             private:
                 char op;
@@ -73,7 +83,7 @@ namespace kaleidoscope
                 CallExprAST(const std::string& c, std::vector<std::unique_ptr<ExprAST>> a)
                     : callee(c), args(std::move(a)) {}
 
-				llvm::Value* codeGen() override;
+				llvm::Value* codeGen(LLVMModule&) override;
 
             private:
                 std::string callee;
@@ -88,7 +98,7 @@ namespace kaleidoscope
                 PrototypeAST(const std::string& n, std::vector<std::string> a)
                     : name(n), args(std::move(a)) {}
 
-				llvm::Function* codeGen();
+				llvm::Function* codeGen(LLVMModule&);
 
 				const std::string& getName() const { return name; }
 
@@ -104,27 +114,29 @@ namespace kaleidoscope
                 FunctionAST(std::unique_ptr<PrototypeAST> p, std::unique_ptr<ExprAST> b)
                     : proto(std::move(p)), body(std::move(b)) {}
 
-				llvm::Function* codeGen();
+				llvm::Function* codeGen(LLVMModule&);
 				
             private:
                 std::unique_ptr<PrototypeAST> proto;
                 std::unique_ptr<ExprAST> body;
             };
         } // namespace ast
+
 		// the parser, which will build our abstract syntax tree.
 		class Parser
 		{
-		public:
+		public:            
+
 			Parser();
 			~Parser() = default;		
 
 			void run();
 
+            void printJitCode() { llvmModule.llvmModule->print(llvm::errs(), nullptr); }	
+
 		private:						
 
-			void mainLoop();
-
-			void initialiseModule();
+			void mainLoop();			
 
 			// provide a simple token buffer where we can look ahead one token
 			// reads another token from the lexer and updates currentToken
@@ -134,7 +146,7 @@ namespace kaleidoscope
 
 			void handleExtern();
 
-			void handleTopLevelExpression();		
+			void handleTopLevelExpression();	
 
 			std::unique_ptr<ast::ExprAST> parsePrimary();
 
@@ -169,6 +181,7 @@ namespace kaleidoscope
 
 			int currentToken;
 			Lexer lexer;
+            ast::LLVMModule llvmModule;
 
 			std::map<char, int> binopPrecedence;
             
