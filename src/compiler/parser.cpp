@@ -152,6 +152,7 @@ Parser::Parser()
 
 void Parser::run()
 {
+    initModuleAndPassManager();
     getNextToken();    
     mainLoop();
 }

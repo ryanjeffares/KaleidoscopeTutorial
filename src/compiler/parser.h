@@ -78,6 +78,8 @@ namespace kaleidoscope
         };
 
         // expression class for function calls
+        // needs to be given a reference to Parser's prototype lookup on construction
+        // so that it can call findFunction later - this is BAD and i should find a cleaner way
         class CallExprAST : public ExprAST
         {
         public:
@@ -126,30 +128,35 @@ namespace kaleidoscope
             llvm::ExitOnError exitOnError;   
             std::unique_ptr<llvm::orc::KaleidoscopeJIT> kaleidoscopeJit;
                         
-		private:						
-            
-            kaleidoscope::LLVMModule llvmModule;
+		private:						                        
 
+            // the main loop that reads from standard input
 			void mainLoop();			
 
 			// provide a simple token buffer where we can look ahead one token
 			// reads another token from the lexer and updates currentToken
 			int getNextToken() { return currentToken = lexer.getToken(); }
 
+            // handlers for the various types of expressions, called from mainLoop()
 			void handleDefinition();
 
 			void handleExtern();
 
 			void handleTopLevelExpression();	
 
+            // begins parsing a binary expression, starts recursion
 			std::unique_ptr<ExprAST> parsePrimary();
 
+            // parses the definition of a function, ie its name and args
 			std::unique_ptr<PrototypeAST> parsePrototype();
 
+            // parses the body of a function
 			std::unique_ptr<FunctionAST> parseDefinition();
 
+            // parses a prototype of an extern function
 			std::unique_ptr<PrototypeAST> parseExtern();
 
+            // parses a top level expression, ie a call to a function or top level arithmetic
 			std::unique_ptr<FunctionAST> parseTopLevelExpr();
 
 			// gets the left hand side of a binary expression, then gets the right
@@ -175,15 +182,18 @@ namespace kaleidoscope
 
 			int currentToken;
 			Lexer lexer;            
-
+            kaleidoscope::LLVMModule llvmModule;
 			std::map<char, int> binopPrecedence;
             std::map<std::string, std::unique_ptr<PrototypeAST>> functionProtos;
                       
 		};
 
+        // TODO: i dont like having this as a free function but its the only way 
+        // i could think of for now
+        // gets a function that has already been parsed, or else calls codeGen for a new one
         static llvm::Function* findFunction(const std::string& name,
-                                           kaleidoscope::LLVMModule& llvmModule,
-                                           std::map<std::string, std::unique_ptr<PrototypeAST>>& protos)
+                                            kaleidoscope::LLVMModule& llvmModule,
+                                            std::map<std::string, std::unique_ptr<PrototypeAST>>& protos)
         {
             if (auto f = llvmModule.llvmModule->getFunction(name))
             {

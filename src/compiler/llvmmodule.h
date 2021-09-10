@@ -28,7 +28,7 @@ namespace kaleidoscope
             passManager->add(llvm::createInstructionCombiningPass());
             passManager->add(llvm::createReassociatePass());
             passManager->add(llvm::createGVNPass());
-            passManager->add(llvm::createCFGSimplificationPass());
+            passManager->add(llvm::createCFGSimplificationPass());            
             passManager->doInitialization();
         }
     };

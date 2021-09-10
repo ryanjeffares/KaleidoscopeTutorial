@@ -31,8 +31,6 @@ int main()
 
     fprintf(stderr, "ready> ");   
     
-    kaleidoscope::parser::Parser parser;
-    parser.initModuleAndPassManager(); 
-    parser.run();
-    parser.printJitCode();
+    kaleidoscope::parser::Parser parser;    
+    parser.run();    
 }

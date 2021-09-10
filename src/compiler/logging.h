@@ -4,7 +4,7 @@ namespace kaleidoscope
 {
     namespace logging
     {
-        namespace internal
+        namespace detail
         {
             enum LogType
             {
@@ -30,21 +30,21 @@ namespace kaleidoscope
                 }
                 fprintf(stderr, "%s\n", str);                
             }
-        } // namespace private            
+        } // namespace detail            
         
         static void logErrorToken(const char* str)
         {
-            internal::logError(str, internal::LogType::Token);
+            detail::logError(str, detail::LogType::Token);
         }
 
         static void logErrorProto(const char* str)
         {
-            internal::logError(str, internal::LogType::Proto);
+            detail::logError(str, detail::LogType::Proto);
         }
 
         static void logErrorValue(const char* str)
         {
-            internal::logError(str, internal::LogType::Value);
+            detail::logError(str, detail::LogType::Value);
         }        
     } // namespace logging
 } // namespace kaleidoscope
