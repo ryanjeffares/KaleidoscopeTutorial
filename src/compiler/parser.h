@@ -6,121 +6,106 @@
 #include <map>
 
 #include "lexer.h"
-#include "includellvm.h"
 #include "logging.h"
+#include "llvmmodule.h"
+#include "../../include/KaleidoscopeJIT.h"
 
 namespace kaleidoscope
 {
 	namespace parser 
-	{
-        namespace ast
-        {        
-            struct LLVMModule
-            {
-                std::shared_ptr<llvm::LLVMContext> llvmContext;
-                std::shared_ptr<llvm::IRBuilder<>> irBuilder;
-                std::shared_ptr<llvm::Module> llvmModule;
-                std::map<std::string, llvm::Value*> namedValues;
+	{     
+        // base class for all expression nodes
+        class ExprAST
+        {
+        public:
+            virtual ~ExprAST() = default;
+            virtual llvm::Value* codeGen(kaleidoscope::LLVMModule&) = 0;
+        };
 
-                LLVMModule()
-                {
-                    llvmContext = std::make_shared<llvm::LLVMContext>();
-                    llvmModule = std::make_shared<llvm::Module>("Kaleidoscope JIT", *llvmContext);
-                    irBuilder = std::make_shared<llvm::IRBuilder<>>(*llvmContext);
-                }
-            };
+        // expression class for numerical literals
+        class NumberExprAST : public ExprAST
+        {
+        public:
+            NumberExprAST(double v) : value(v) {}
 
-            // base class for all expression nodes
-            class ExprAST
-            {
-            public:
-                virtual ~ExprAST() = default;
-                virtual llvm::Value* codeGen(LLVMModule&) = 0;
-            };
+            llvm::Value* codeGen(kaleidoscope::LLVMModule&) override;
 
-            // expression class for numerical literals
-            class NumberExprAST : public ExprAST
-            {
-            public:
-                NumberExprAST(double v) : value(v) {}
+        private:
+            double value;
+        };
 
-                llvm::Value* codeGen(LLVMModule&) override;
+        // expression class for referencing a variable
+        class VariableExprAST : public ExprAST
+        {
+        public:
+            VariableExprAST(const std::string& n) : name(n) {}
 
-            private:
-                double value;
-            };
+            llvm::Value* codeGen(kaleidoscope::LLVMModule&) override;  
 
-            // expression class for referencing a variable
-            class VariableExprAST : public ExprAST
-            {
-            public:
-                VariableExprAST(const std::string& n) : name(n) {}
+        private:
+            std::string name;
+        };
 
-                llvm::Value* codeGen(LLVMModule&) override;  
+        // expression class for binary operator
+        class BinaryExprAST : public ExprAST
+        {
+        public:
+            BinaryExprAST(char o, std::unique_ptr<ExprAST> l, std::unique_ptr<ExprAST> r)
+                : op(o), lhs(std::move(l)), rhs(std::move(r)) {}
 
-            private:
-                std::string name;
-            };
+            llvm::Value* codeGen(kaleidoscope::LLVMModule&) override;
 
-            // expression class for binary operator
-            class BinaryExprAST : public ExprAST
-            {
-            public:
-                BinaryExprAST(char o, std::unique_ptr<ExprAST> l, std::unique_ptr<ExprAST> r)
-                    : op(o), lhs(std::move(l)), rhs(std::move(r)) {}
+        private:
+            char op;
+            std::unique_ptr<ExprAST> lhs, rhs;
+        };        
 
-                llvm::Value* codeGen(LLVMModule&) override;
+        // this class represents the prototype for a function,
+        // which captures its name and its arguments' names
+        class PrototypeAST
+        {
+        public:
+            PrototypeAST(const std::string& n, std::vector<std::string> a)
+                : name(n), args(std::move(a)) {}
 
-            private:
-                char op;
-                std::unique_ptr<ExprAST> lhs, rhs;
-            };
+            llvm::Function* codeGen(kaleidoscope::LLVMModule&);
 
-            // expression class for function calls
-            class CallExprAST : public ExprAST
-            {
-            public:
-                CallExprAST(const std::string& c, std::vector<std::unique_ptr<ExprAST>> a)
-                    : callee(c), args(std::move(a)) {}
+            const std::string& getName() const { return name; }
 
-				llvm::Value* codeGen(LLVMModule&) override;
+        private:
+            std::string name;
+            std::vector<std::string> args;
+        };
 
-            private:
-                std::string callee;
-                std::vector<std::unique_ptr<ExprAST>> args;
-            };
+        // expression class for function calls
+        class CallExprAST : public ExprAST
+        {
+        public:
+            CallExprAST(const std::string& c, std::vector<std::unique_ptr<ExprAST>> a, 
+                std::map<std::string, std::unique_ptr<PrototypeAST>>& map)
+                : callee(c), args(std::move(a)), protos(map) {}
 
-            // this class represents the prototype for a function,
-            // which captures its name and its arguments' names
-            class PrototypeAST
-            {
-            public:
-                PrototypeAST(const std::string& n, std::vector<std::string> a)
-                    : name(n), args(std::move(a)) {}
+            llvm::Value* codeGen(kaleidoscope::LLVMModule&) override;            
 
-				llvm::Function* codeGen(LLVMModule&);
+        private:
+            std::string callee;
+            std::vector<std::unique_ptr<ExprAST>> args;
+            std::map<std::string, std::unique_ptr<PrototypeAST>>& protos;
+        };
 
-				const std::string& getName() const { return name; }
+        // this class represents a function definition itself
+        class FunctionAST
+        {
+        public:
+            FunctionAST(std::unique_ptr<PrototypeAST> p, std::unique_ptr<ExprAST> b)
+                : proto(std::move(p)), body(std::move(b)) {}
 
-            private:
-                std::string name;
-                std::vector<std::string> args;
-            };
-
-            // this class represents a function definition itself
-            class FunctionAST
-            {
-            public:
-                FunctionAST(std::unique_ptr<PrototypeAST> p, std::unique_ptr<ExprAST> b)
-                    : proto(std::move(p)), body(std::move(b)) {}
-
-				llvm::Function* codeGen(LLVMModule&);
-				
-            private:
-                std::unique_ptr<PrototypeAST> proto;
-                std::unique_ptr<ExprAST> body;
-            };
-        } // namespace ast
+            llvm::Function* codeGen(kaleidoscope::LLVMModule&, std::map<std::string, std::unique_ptr<PrototypeAST>>&);
+            
+        private:
+            std::unique_ptr<PrototypeAST> proto;
+            std::unique_ptr<ExprAST> body;
+        };        
 
 		// the parser, which will build our abstract syntax tree.
 		class Parser
@@ -132,9 +117,18 @@ namespace kaleidoscope
 
 			void run();
 
-            void printJitCode() { llvmModule.llvmModule->print(llvm::errs(), nullptr); }	
+            void printJitCode() { llvmModule.llvmModule->print(llvm::errs(), nullptr); }
 
+            void initModuleAndPassManager();                               
+
+        public:
+
+            llvm::ExitOnError exitOnError;   
+            std::unique_ptr<llvm::orc::KaleidoscopeJIT> kaleidoscopeJit;
+                        
 		private:						
+            
+            kaleidoscope::LLVMModule llvmModule;
 
 			void mainLoop();			
 
@@ -148,43 +142,61 @@ namespace kaleidoscope
 
 			void handleTopLevelExpression();	
 
-			std::unique_ptr<ast::ExprAST> parsePrimary();
+			std::unique_ptr<ExprAST> parsePrimary();
 
-			std::unique_ptr<ast::PrototypeAST> parsePrototype();
+			std::unique_ptr<PrototypeAST> parsePrototype();
 
-			std::unique_ptr<ast::FunctionAST> parseDefinition();
+			std::unique_ptr<FunctionAST> parseDefinition();
 
-			std::unique_ptr<ast::PrototypeAST> parseExtern();
+			std::unique_ptr<PrototypeAST> parseExtern();
 
-			std::unique_ptr<ast::FunctionAST> parseTopLevelExpr();
+			std::unique_ptr<FunctionAST> parseTopLevelExpr();
 
 			// gets the left hand side of a binary expression, then gets the right
-			std::unique_ptr<ast::ExprAST> parseExpression();
+			std::unique_ptr<ExprAST> parseExpression();
 
 			// gets the right hand side of a binary expression
-			std::unique_ptr<ast::ExprAST> parseBinOpRhs(int exprPrec, std::unique_ptr<ast::ExprAST> lhs);
+			std::unique_ptr<ExprAST> parseBinOpRhs(int exprPrec, std::unique_ptr<ExprAST> lhs);
 
 			// handles variable references and function calls
-			std::unique_ptr<ast::ExprAST> parseIdentifierExpr();
+			std::unique_ptr<ExprAST> parseIdentifierExpr();
 
 			// call when current token is a number. 
 			// creates a node then advances the lexer to the next token before returning it.
-			std::unique_ptr<ast::ExprAST> parseNumberExpr();
+			std::unique_ptr<ExprAST> parseNumberExpr();
 
 			// call when current token is an open parenthesis.
 			// checks for closing parenthesis, and eats both.
-			std::unique_ptr<ast::ExprAST> parseParenExpr();
+			std::unique_ptr<ExprAST> parseParenExpr();
 
 			int getTokPrecedence();			
 
 		private:
 
 			int currentToken;
-			Lexer lexer;
-            ast::LLVMModule llvmModule;
+			Lexer lexer;            
 
 			std::map<char, int> binopPrecedence;
-            
-		};        
+            std::map<std::string, std::unique_ptr<PrototypeAST>> functionProtos;
+                      
+		};
+
+        static llvm::Function* findFunction(const std::string& name,
+                                           kaleidoscope::LLVMModule& llvmModule,
+                                           std::map<std::string, std::unique_ptr<PrototypeAST>>& protos)
+        {
+            if (auto f = llvmModule.llvmModule->getFunction(name))
+            {
+                return f;
+            }
+
+            auto it = protos.find(name);
+            if (it != protos.end())
+            {
+                return it->second->codeGen(llvmModule);
+            }
+
+            return nullptr;
+        }
 	}   // namespace parser   
 }   // namespace kaleidoscope

@@ -1,16 +1,15 @@
 #include "parser.h"
 
 using namespace kaleidoscope::parser;
-using namespace kaleidoscope::parser::ast;
 
 // =================== AST ===================
 
-llvm::Value* NumberExprAST::codeGen(LLVMModule& llvmModule)
+llvm::Value* NumberExprAST::codeGen(kaleidoscope::LLVMModule& llvmModule)
 {
     return llvm::ConstantFP::get(*(llvmModule.llvmContext), llvm::APFloat(value));
 }
 
-llvm::Value* VariableExprAST::codeGen(LLVMModule& llvmModule)
+llvm::Value* VariableExprAST::codeGen(kaleidoscope::LLVMModule& llvmModule)
 {
     auto v = llvmModule.namedValues[name];
     if (!v)
@@ -20,7 +19,7 @@ llvm::Value* VariableExprAST::codeGen(LLVMModule& llvmModule)
     return v;
 } 
 
-llvm::Value* BinaryExprAST::codeGen(LLVMModule& llvmModule) 
+llvm::Value* BinaryExprAST::codeGen(kaleidoscope::LLVMModule& llvmModule) 
 {
     auto l = lhs->codeGen(llvmModule);
     auto r = rhs->codeGen(llvmModule);
@@ -50,9 +49,10 @@ llvm::Value* BinaryExprAST::codeGen(LLVMModule& llvmModule)
     }
 }
 
-llvm::Value* CallExprAST::codeGen(LLVMModule& llvmModule)
+llvm::Value* CallExprAST::codeGen(kaleidoscope::LLVMModule& llvmModule)
 {
-    auto calleeFunc = llvmModule.llvmModule->getFunction(callee);
+    // auto calleeFunc = llvmModule.getFunction(callee);
+    auto calleeFunc = findFunction(callee, llvmModule, protos);
     if (!calleeFunc)
     {
         logging::logErrorValue("Unknown function referenced.");
@@ -78,7 +78,7 @@ llvm::Value* CallExprAST::codeGen(LLVMModule& llvmModule)
     return llvmModule.irBuilder->CreateCall(calleeFunc, argsVec, "calltmp");
 }
 
-llvm::Function* PrototypeAST::codeGen(LLVMModule& llvmModule)
+llvm::Function* PrototypeAST::codeGen(kaleidoscope::LLVMModule& llvmModule)
 {
     std::vector<llvm::Type*> doubles(args.size(), llvm::Type::getDoubleTy(*(llvmModule.llvmContext)));
     auto fType = llvm::FunctionType::get(llvm::Type::getDoubleTy(*(llvmModule.llvmContext)), doubles, false);
@@ -93,15 +93,14 @@ llvm::Function* PrototypeAST::codeGen(LLVMModule& llvmModule)
     return func;
 }
 
-llvm::Function* FunctionAST::codeGen(LLVMModule& llvmModule)
+llvm::Function* FunctionAST::codeGen(kaleidoscope::LLVMModule& llvmModule,
+                                     std::map<std::string, std::unique_ptr<PrototypeAST>>& functionProtos)
 {
-    // first check for existing function from a previous extern declaration
-    auto func = llvmModule.llvmModule->getFunction(proto->getName());
-
-    if (!func)
-    {
-        func = proto->codeGen(llvmModule);
-    }
+    // transfer ownership of the prototype to the functionProtos map,
+    // but keep a reference to it for use below
+    auto& p = *proto;
+    functionProtos[proto->getName()] = std::move(proto);    
+    auto func = findFunction(p.getName(), llvmModule, functionProtos);
 
     if (!func)
     {
@@ -129,7 +128,8 @@ llvm::Function* FunctionAST::codeGen(LLVMModule& llvmModule)
     {
         // finish off the function and validate it
         llvmModule.irBuilder->CreateRet(returnValue);
-        llvm::verifyFunction(*func);
+        llvm::verifyFunction(*func);        
+        llvmModule.passManager->run(*func);
         return func;
     }
 
@@ -142,6 +142,7 @@ llvm::Function* FunctionAST::codeGen(LLVMModule& llvmModule)
 
 Parser::Parser()
 {
+    kaleidoscopeJit = exitOnError(llvm::orc::KaleidoscopeJIT::Create());
     binopPrecedence['<'] = 10;
     binopPrecedence['+'] = 20;
     binopPrecedence['-'] = 30;
@@ -180,15 +181,24 @@ void Parser::mainLoop()
     }
 }
 
+void Parser::initModuleAndPassManager()
+{
+    llvmModule.doInit(kaleidoscopeJit.get());
+}
+
 void Parser::handleDefinition()
 {
     if (auto funcAst = parseDefinition())
     {
-        if (auto funcIr = funcAst->codeGen(llvmModule))
+        if (auto funcIr = funcAst->codeGen(llvmModule, functionProtos))
         {
             fprintf(stderr, "Read function definition: \n");
             funcIr->print(llvm::errs());
             fprintf(stderr, "\n");
+            exitOnError(kaleidoscopeJit->addModule(
+                llvm::orc::ThreadSafeModule(std::move(llvmModule.llvmModule), 
+                std::move(llvmModule.llvmContext))));
+            initModuleAndPassManager();
         }					
     }
     else 
@@ -206,6 +216,7 @@ void Parser::handleExtern()
             fprintf(stderr, "Read extern: \n");
             funcIr->print(llvm::errs());
             fprintf(stderr, "\n");
+            functionProtos[funcAst->getName()] = std::move(funcAst);
         }					
     }
     else
@@ -218,12 +229,26 @@ void Parser::handleTopLevelExpression()
 {
     if (auto funcAst = parseTopLevelExpr())
     {
-        if (auto funcIr = funcAst->codeGen(llvmModule))
+        if (funcAst->codeGen(llvmModule, functionProtos))
         {
-            fprintf(stderr, "Read a top level expression: \n");
-            funcIr->print(llvm::errs());
-            fprintf(stderr, "\n");
-            funcIr->eraseFromParent();
+            // jit the module containing the anonymous expression,
+            // keeping a handle on it so we can free it later
+            auto resourceTracker = kaleidoscopeJit->getMainJITDylib().createResourceTracker();
+            
+            auto tsm = llvm::orc::ThreadSafeModule(std::move(llvmModule.llvmModule), 
+                std::move(llvmModule.llvmContext));
+            exitOnError(kaleidoscopeJit->addModule(std::move(tsm), resourceTracker));
+            initModuleAndPassManager();
+
+            // search the jit for the __anon_expr symbol
+            auto exprSymbol = exitOnError(kaleidoscopeJit->lookup("__anon_expr"));
+
+            // get the symbol's address and cast it to the right type
+            // so we can call it as a native function
+            double (*fp)() = (double (*)())(intptr_t)exprSymbol.getAddress();            
+            fprintf(stderr, "Evaluated to %f\n", fp());
+                     
+            exitOnError(resourceTracker->remove());
         }
     }
     else 
@@ -232,7 +257,7 @@ void Parser::handleTopLevelExpression()
     }
 }	
 
-std::unique_ptr<ast::ExprAST> Parser::parsePrimary()
+std::unique_ptr<ExprAST> Parser::parsePrimary()
 {
     switch (currentToken) 
     {
@@ -248,7 +273,7 @@ std::unique_ptr<ast::ExprAST> Parser::parsePrimary()
     }
 }
 
-std::unique_ptr<ast::PrototypeAST> Parser::parsePrototype()
+std::unique_ptr<PrototypeAST> Parser::parsePrototype()
 {
     if (currentToken != Lexer::Token::TOK_IDENT)
     {
@@ -278,10 +303,10 @@ std::unique_ptr<ast::PrototypeAST> Parser::parsePrototype()
     }
 
     getNextToken();
-    return std::make_unique<ast::PrototypeAST>(funcName, std::move(argNames));
+    return std::make_unique<PrototypeAST>(funcName, std::move(argNames));
 }
             
-std::unique_ptr<ast::FunctionAST> Parser::parseDefinition()
+std::unique_ptr<FunctionAST> Parser::parseDefinition()
 {
     getNextToken();
 
@@ -294,30 +319,30 @@ std::unique_ptr<ast::FunctionAST> Parser::parseDefinition()
 
     if (auto e = parseExpression())
     {
-        return std::make_unique<ast::FunctionAST>(std::move(proto), std::move(e));
+        return std::make_unique<FunctionAST>(std::move(proto), std::move(e));
     }
 
     return nullptr;
 }
             
-std::unique_ptr<ast::PrototypeAST> Parser::parseExtern()
+std::unique_ptr<PrototypeAST> Parser::parseExtern()
 {
     getNextToken();
     return parsePrototype();    
 }
 
-std::unique_ptr<ast::FunctionAST> Parser::parseTopLevelExpr()
+std::unique_ptr<FunctionAST> Parser::parseTopLevelExpr()
 {
     if (auto e = parseExpression())
     {
-        auto proto = std::make_unique<ast::PrototypeAST>("__anon_expr", std::vector<std::string>());
-        return std::make_unique<ast::FunctionAST>(std::move(proto), std::move(e));
+        auto proto = std::make_unique<PrototypeAST>("__anon_expr", std::vector<std::string>());
+        return std::make_unique<FunctionAST>(std::move(proto), std::move(e));
     }
     return nullptr;
 }
 
 // gets the left hand side of a binary expression, then gets the right
-std::unique_ptr<ast::ExprAST> Parser::parseExpression()
+std::unique_ptr<ExprAST> Parser::parseExpression()
 {
     auto lhs = parsePrimary();
     if (!lhs)
@@ -328,7 +353,7 @@ std::unique_ptr<ast::ExprAST> Parser::parseExpression()
 }
 
 // gets the right hand side of a binary expression
-std::unique_ptr<ast::ExprAST> Parser::parseBinOpRhs(int exprPrec, std::unique_ptr<ast::ExprAST> lhs)
+std::unique_ptr<ExprAST> Parser::parseBinOpRhs(int exprPrec, std::unique_ptr<ExprAST> lhs)
 {
     while (1)
     {
@@ -365,12 +390,12 @@ std::unique_ptr<ast::ExprAST> Parser::parseBinOpRhs(int exprPrec, std::unique_pt
         }
 
         // merge lhs/rhs
-        lhs = std::make_unique<ast::BinaryExprAST>(binOp, std::move(lhs), std::move(rhs));
+        lhs = std::make_unique<BinaryExprAST>(binOp, std::move(lhs), std::move(rhs));
     }
 }
             
 // handles variable references and function calls
-std::unique_ptr<ast::ExprAST> Parser::parseIdentifierExpr()
+std::unique_ptr<ExprAST> Parser::parseIdentifierExpr()
 {
     std::string idName = lexer.getIdentStr();
     // eat the identifier
@@ -379,12 +404,12 @@ std::unique_ptr<ast::ExprAST> Parser::parseIdentifierExpr()
     // simple variable reference
     if (currentToken != '(')
     {
-        return std::make_unique<ast::VariableExprAST>(idName);
+        return std::make_unique<VariableExprAST>(idName);
     }
 
     // eat the token
     getNextToken();
-    std::vector<std::unique_ptr<ast::ExprAST>> args;
+    std::vector<std::unique_ptr<ExprAST>> args;
     if (currentToken != ')')
     {
         while (1)
@@ -415,21 +440,21 @@ std::unique_ptr<ast::ExprAST> Parser::parseIdentifierExpr()
 
     // eat the ')'
     getNextToken();
-    return std::make_unique<ast::CallExprAST>(idName, std::move(args));
+    return std::make_unique<CallExprAST>(idName, std::move(args), functionProtos);
 }
             
 // call when current token is a number. 
 // creates a node then advances the lexer to the next token before returning it.
-std::unique_ptr<ast::ExprAST> Parser::parseNumberExpr()
+std::unique_ptr<ExprAST> Parser::parseNumberExpr()
 {
-    auto result = std::make_unique<ast::NumberExprAST>(lexer.getNumValue());
+    auto result = std::make_unique<NumberExprAST>(lexer.getNumValue());
     getNextToken();
     return std::move(result);
 }
 
 // call when current token is an open parenthesis.
 // checks for closing parenthesis, and eats both.
-std::unique_ptr<ast::ExprAST> Parser::parseParenExpr()
+std::unique_ptr<ExprAST> Parser::parseParenExpr()
 {
     getNextToken();
     auto v = parseExpression();
