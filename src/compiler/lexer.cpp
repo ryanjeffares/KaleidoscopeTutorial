@@ -2,6 +2,19 @@
 
 using namespace kaleidoscope;
 
+Lexer::Lexer() : lastChar(' ')
+{
+    tokenLookup["def"] = Token::TOK_DEF;
+    tokenLookup["extern"] = Token::TOK_EXTERN;
+    tokenLookup["if"] = Token::TOK_IF;
+    tokenLookup["then"] = Token::TOK_THEN;
+    tokenLookup["else"] = Token::TOK_ELSE;
+    tokenLookup["for"] = Token::TOK_FOR;
+    tokenLookup["in"] = Token::TOK_IN;
+    tokenLookup["unary"] = Token::TOK_UNARY;
+    tokenLookup["binary"] = Token::TOK_BINARY; 
+}
+
 int Lexer::getToken()
 {                
     // skip whitespace
@@ -22,36 +35,15 @@ int Lexer::getToken()
         }
 
         // return either of the defined keywords, or the identifier
-        if (identifierStr == "def")
+        auto it = tokenLookup.find(identifierStr);
+        if (it != tokenLookup.end())
         {
-            return Token::TOK_DEF;
+            return it->second;
         }
-        if (identifierStr == "extern")
+        else  
         {
-            return Token::TOK_EXTERN;
-        }
-        if (identifierStr == "if")
-        {
-            return Token::TOK_IF;
-        }
-        if (identifierStr == "then")
-        {
-            return Token::TOK_THEN;
-        }
-        if (identifierStr == "else")
-        {
-            return Token::TOK_ELSE;
-        }
-        if (identifierStr == "for")
-        {
-            return Token::TOK_FOR;
-        }
-        if (identifierStr == "in")
-        {
-            return Token::TOK_IN;
-        }
-
-        return Token::TOK_IDENT;
+            return Token::TOK_IDENT;
+        }        
     }
 
     // parse a number and a decimal point if it has it.

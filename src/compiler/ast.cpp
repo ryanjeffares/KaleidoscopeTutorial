@@ -28,31 +28,56 @@ llvm::Value* BinaryExprAST::codeGen(kaleidoscope::LLVMTools& llvmTools)
         return nullptr;
     }
 
+    auto& builder = llvmTools.irBuilder;
+    auto& context = llvmTools.llvmContext;
     switch (op)
     {
         case '+':
-            return llvmTools.irBuilder->CreateFAdd(l, r, "addtmp");                        
+            return builder->CreateFAdd(l, r, "addtmp");                        
         case '-':
-            return llvmTools.irBuilder->CreateFSub(l, r, "subtmp");
+            return builder->CreateFSub(l, r, "subtmp");
         case '/':
-            return llvmTools.irBuilder->CreateFDiv(l, r, "divtmp");
+            return builder->CreateFDiv(l, r, "divtmp");
         case '*':
-            return llvmTools.irBuilder->CreateFMul(l, r, "multmp");
+            return builder->CreateFMul(l, r, "multmp");
         case '<':
-            l = llvmTools.irBuilder->CreateFCmpULT(l, r, "lttmp");
+            l = builder->CreateFCmpULT(l, r, "lttmp");
             // convert bool 0/1 to double 0.0/1.0
-            return llvmTools.irBuilder->CreateUIToFP(
-                l, llvm::Type::getDoubleTy(*(llvmTools.llvmContext)), "boollttmp"
+            return builder->CreateUIToFP(
+                l, llvm::Type::getDoubleTy(*context), "boollttmp"
             );
-        case '>':
-            l = llvmTools.irBuilder->CreateFCmpUGT(l, r, "gttmp");
-            return llvmTools.irBuilder->CreateUIToFP(
-                l, llvm::Type::getDoubleTy(*(llvmTools.llvmContext)), "boolgttmp"
-            );
+        // case '>':
+        //     l = builder->CreateFCmpUGT(l, r, "gttmp");
+        //     return builder->CreateUIToFP(
+        //         l, llvm::Type::getDoubleTy(*context), "boolgttmp"
+        //     );
         default:
-            logging::logErrorValue("Invalid binary operator.");
-            return nullptr;                            
+            break;                          
     }
+
+    // if it wasn't built in, it must be user defined
+    auto func = findFunction(std::string("binary") + op, llvmTools, protos);
+    assert(func && "binary operator not found!");
+    llvm::Value* ops[2] = { l, r };
+    return builder->CreateCall(func, ops, "binop");
+}
+
+llvm::Value* UnaryExprAST::codeGen(kaleidoscope::LLVMTools& llvmTools)
+{
+    auto operandValue = operand->codeGen(llvmTools);
+    if (!operandValue)
+    {
+        return nullptr;
+    }
+
+    auto func = findFunction(std::string("unary") + opcode, llvmTools, protos);
+    if (!func)
+    {
+        logging::logErrorValue("Unknown unary operator.");
+        return nullptr;
+    }
+
+    return llvmTools.irBuilder->CreateCall(func, operandValue, "unop");
 }
 
 llvm::Value* CallExprAST::codeGen(kaleidoscope::LLVMTools& llvmTools)
@@ -112,11 +137,10 @@ llvm::Function* FunctionAST::codeGen(kaleidoscope::LLVMTools& llvmTools,
         return nullptr;
     }
 
-    // if (!func->empty())
-    // {
-    // 	logging::logErrorValue("Function cannot be redefined.");
-    // 	return nullptr;
-    // }
+    if (p.isBinaryOp())
+    {
+        binopPrecedence[p.getOperatorName()] = p.getBinaryPrecedence();
+    }
 
     // create a new basic block to start insertion into
     auto block = llvm::BasicBlock::Create(*(llvmTools.llvmContext), "entry", func);
@@ -152,18 +176,19 @@ llvm::Value* IfExprAST::codeGen(kaleidoscope::LLVMTools& llvmTools)
     }
 
     auto& builder = llvmTools.irBuilder;
+    auto& context = llvmTools.llvmContext;
 
     // convert condition to a bool by comparing non-equal to 0.0
     condValue = builder->CreateFCmpONE(
-        condValue, llvm::ConstantFP::get(*(llvmTools.llvmContext), llvm::APFloat(0.0)), "ifcond");
+        condValue, llvm::ConstantFP::get(*context, llvm::APFloat(0.0)), "ifcond");
 
     auto func = builder->GetInsertBlock()->getParent();
 
     // create blocks for the then and else cases
     // insert the 'then' block at the end of the function
-    auto thenBlock = llvm::BasicBlock::Create(*(llvmTools.llvmContext), "then", func);
-    auto elseBlock = llvm::BasicBlock::Create(*(llvmTools.llvmContext), "else");
-    auto mergeBlock = llvm::BasicBlock::Create(*(llvmTools.llvmContext), "ifcont");
+    auto thenBlock = llvm::BasicBlock::Create(*context, "then", func);
+    auto elseBlock = llvm::BasicBlock::Create(*context, "else");
+    auto mergeBlock = llvm::BasicBlock::Create(*context, "ifcont");
 
     builder->CreateCondBr(condValue, thenBlock, elseBlock);
 
@@ -198,7 +223,7 @@ llvm::Value* IfExprAST::codeGen(kaleidoscope::LLVMTools& llvmTools)
     builder->SetInsertPoint(mergeBlock);
 
     auto phiNode = builder->CreatePHI(
-        llvm::Type::getDoubleTy(*(llvmTools.llvmContext)), 2, "iftmp");
+        llvm::Type::getDoubleTy(*context), 2, "iftmp");
 
     phiNode->addIncoming(thenValue, thenBlock);
     phiNode->addIncoming(elseValue, elseBlock);

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <string>
+#include <map>
 
 namespace kaleidoscope
 {
@@ -19,10 +20,12 @@ namespace kaleidoscope
 			TOK_THEN = -7,
 			TOK_ELSE = -8,
 			TOK_FOR = -9,
-			TOK_IN = -10
+			TOK_IN = -10,
+			TOK_UNARY = -11,
+			TOK_BINARY = -12
 		};
 
-		Lexer() : lastChar(' ') {}
+		Lexer();
 		~Lexer() = default;
 
 	    int getToken();
@@ -36,5 +39,7 @@ namespace kaleidoscope
 		int lastChar;
 		double numValue;
 		std::string identifierStr;
+
+		std::map<std::string, Token> tokenLookup;
 	};
 }

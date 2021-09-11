@@ -27,12 +27,7 @@ namespace kaleidoscope
 
             void printJitCode() { llvmTools.llvmModule->print(llvm::errs(), nullptr); }
 
-            void initModuleAndPassManager();                               
-
-        public:
-
-            llvm::ExitOnError exitOnError;   
-            std::unique_ptr<llvm::orc::KaleidoscopeJIT> kaleidoscopeJit;
+            void initModuleAndPassManager();                                                   
                         
 		private:						                        
 
@@ -71,6 +66,9 @@ namespace kaleidoscope
 			// gets the right hand side of a binary expression
 			std::unique_ptr<kaleidoscope::ast::ExprAST> parseBinOpRhs(int exprPrec, std::unique_ptr<kaleidoscope::ast::ExprAST> lhs);
 
+            // parse a unary definition
+            std::unique_ptr<kaleidoscope::ast::ExprAST> parseUnary();
+
 			// handles variable references and function calls
 			std::unique_ptr<kaleidoscope::ast::ExprAST> parseIdentifierExpr();
 
@@ -95,6 +93,10 @@ namespace kaleidoscope
 			int currentToken;
 			Lexer lexer;            
             kaleidoscope::LLVMTools llvmTools;
+
+            llvm::ExitOnError exitOnError;   
+
+            std::unique_ptr<llvm::orc::KaleidoscopeJIT> kaleidoscopeJit;
 			std::map<char, int> binopPrecedence;
             std::map<std::string, std::unique_ptr<kaleidoscope::ast::PrototypeAST>> functionProtos;
                       

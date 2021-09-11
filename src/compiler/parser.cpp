@@ -7,11 +7,9 @@ Parser::Parser()
 {
     kaleidoscopeJit = exitOnError(llvm::orc::KaleidoscopeJIT::Create());    
     binopPrecedence['<'] = 10;
-    binopPrecedence['>'] = 20;
-    binopPrecedence['+'] = 30;
-    binopPrecedence['-'] = 40;
-    binopPrecedence['/'] = 50;
-    binopPrecedence['*'] = 60;
+    binopPrecedence['+'] = 20;
+    binopPrecedence['-'] = 20;    
+    binopPrecedence['*'] = 40;
 }	
 
 void Parser::run()
@@ -62,7 +60,8 @@ void Parser::handleDefinition()
             fprintf(stderr, "\n");
             exitOnError(kaleidoscopeJit->addModule(
                 llvm::orc::ThreadSafeModule(std::move(llvmTools.llvmModule), 
-                std::move(llvmTools.llvmContext))));
+                std::move(llvmTools.llvmContext)))
+            );
             initModuleAndPassManager();
         }					
     }
@@ -144,14 +143,58 @@ std::unique_ptr<ExprAST> Parser::parsePrimary()
 
 std::unique_ptr<PrototypeAST> Parser::parsePrototype()
 {
-    if (currentToken != Lexer::Token::TOK_IDENT)
-    {
-        logging::logErrorProto("Expected function name in prototype.");
-        return nullptr;
-    }
+    std::string funcName;
+    unsigned kind = 0; // 0=ident, 1=unary, 2=binary
+    unsigned binaryPrecedence = 30;
 
-    std::string funcName = lexer.getIdentStr();
-    getNextToken();
+    switch (currentToken)
+    {
+        case Lexer::Token::TOK_IDENT:
+            funcName = lexer.getIdentStr();
+            kind = 0;
+            getNextToken();
+            break;
+        case Lexer::Token::TOK_BINARY:
+            getNextToken();
+            if (!isascii(currentToken))
+            {
+                logging::logErrorProto("Expected binary operator.");
+                return nullptr;
+            }
+            funcName = "binary";
+            funcName += (char)currentToken;
+            kind = 2;
+            getNextToken();
+
+            // read precedence if present
+            if (currentToken == Lexer::Token::TOK_NUM)
+            {
+                auto num = lexer.getNumValue();
+                if (num < 1 || num > 100)
+                {
+                    logging::logErrorProto("Invalid precedence, must be 1..100.");
+                    return nullptr;
+                }
+                binaryPrecedence = (unsigned)num;
+                getNextToken();
+            }
+            break;
+        case Lexer::Token::TOK_UNARY:
+            getNextToken();
+            if (!isascii(currentToken))
+            {
+                logging::logErrorProto("Expected unary operator.");
+                return nullptr;
+            }
+            funcName = "unary";
+            funcName += (char)currentToken;
+            kind = 1;
+            getNextToken();
+            break;
+        default:
+            logging::logErrorProto("Expected function name in prototype.");
+            return nullptr;
+    }
 
     if (currentToken != '(')
     {
@@ -172,7 +215,16 @@ std::unique_ptr<PrototypeAST> Parser::parsePrototype()
     }
 
     getNextToken();
-    return std::make_unique<PrototypeAST>(funcName, std::move(argNames));
+
+    if (kind && argNames.size() != kind)
+    {
+        logging::logErrorProto("Invalid number of operands for operator.");
+        return nullptr;
+    }
+
+    return std::make_unique<PrototypeAST>(
+        funcName, std::move(argNames), kind != 0, binaryPrecedence
+    );
 }
             
 std::unique_ptr<FunctionAST> Parser::parseDefinition()
@@ -188,7 +240,9 @@ std::unique_ptr<FunctionAST> Parser::parseDefinition()
 
     if (auto e = parseExpression())
     {
-        return std::make_unique<FunctionAST>(std::move(proto), std::move(e));
+        return std::make_unique<FunctionAST>(
+            std::move(proto), std::move(e), binopPrecedence
+        );
     }
 
     return nullptr;
@@ -204,8 +258,12 @@ std::unique_ptr<FunctionAST> Parser::parseTopLevelExpr()
 {
     if (auto e = parseExpression())
     {
-        auto proto = std::make_unique<PrototypeAST>("__anon_expr", std::vector<std::string>());
-        return std::make_unique<FunctionAST>(std::move(proto), std::move(e));
+        auto proto = std::make_unique<PrototypeAST>(
+            "__anon_expr", std::vector<std::string>()
+        );
+        return std::make_unique<FunctionAST>(
+            std::move(proto), std::move(e), binopPrecedence
+        );
     }
     return nullptr;
 }
@@ -213,7 +271,7 @@ std::unique_ptr<FunctionAST> Parser::parseTopLevelExpr()
 // gets the left hand side of a binary expression, then gets the right
 std::unique_ptr<ExprAST> Parser::parseExpression()
 {
-    auto lhs = parsePrimary();
+    auto lhs = parseUnary();
     if (!lhs)
     {
         return nullptr;
@@ -240,7 +298,7 @@ std::unique_ptr<ExprAST> Parser::parseBinOpRhs(int exprPrec, std::unique_ptr<Exp
         // eat binop
         getNextToken();
 
-        auto rhs = parsePrimary();
+        auto rhs = parseUnary();
         if (!rhs)
         {
             return nullptr;
@@ -259,10 +317,31 @@ std::unique_ptr<ExprAST> Parser::parseBinOpRhs(int exprPrec, std::unique_ptr<Exp
         }
 
         // merge lhs/rhs
-        lhs = std::make_unique<BinaryExprAST>(binOp, std::move(lhs), std::move(rhs));
+        lhs = std::make_unique<BinaryExprAST>(
+            binOp, std::move(lhs), std::move(rhs), functionProtos
+        );
     }
 }
-            
+
+std::unique_ptr<ExprAST> Parser::parseUnary()
+{
+    // if the current token is not an operator, it must be a primary expression
+    if (!isascii(currentToken) || currentToken == '(' || currentToken == ',')
+    {
+        return parsePrimary();
+    }
+
+    // read the unary operator
+    int opcode = currentToken;
+    getNextToken();
+    if (auto operand = parseUnary())
+    {
+        return std::make_unique<UnaryExprAST>(opcode, std::move(operand), functionProtos);
+    }
+
+    return nullptr;
+}   
+
 // handles variable references and function calls
 std::unique_ptr<ExprAST> Parser::parseIdentifierExpr()
 {
