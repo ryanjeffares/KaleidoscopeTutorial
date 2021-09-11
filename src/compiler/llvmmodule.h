@@ -8,7 +8,7 @@
 
 namespace kaleidoscope
 {
-    struct LLVMModule
+    struct LLVMTools
     {
         std::unique_ptr<llvm::LLVMContext> llvmContext;
         std::unique_ptr<llvm::IRBuilder<>> irBuilder;

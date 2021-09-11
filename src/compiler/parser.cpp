@@ -1,309 +1,7 @@
 #include "parser.h"
 
 using namespace kaleidoscope::parser;
-
-// =================== AST ===================
-
-llvm::Value* NumberExprAST::codeGen(kaleidoscope::LLVMModule& llvmModule)
-{
-    return llvm::ConstantFP::get(*(llvmModule.llvmContext), llvm::APFloat(value));
-}
-
-llvm::Value* VariableExprAST::codeGen(kaleidoscope::LLVMModule& llvmModule)
-{
-    auto v = llvmModule.namedValues[name];
-    if (!v)
-    {
-        logging::logErrorValue("Unknown variable name.");                        
-    }
-    return v;
-} 
-
-llvm::Value* BinaryExprAST::codeGen(kaleidoscope::LLVMModule& llvmModule) 
-{
-    auto l = lhs->codeGen(llvmModule);
-    auto r = rhs->codeGen(llvmModule);
-
-    if (!l || !r)
-    {
-        return nullptr;
-    }
-
-    switch (op)
-    {
-        case '+':
-            return llvmModule.irBuilder->CreateFAdd(l, r, "addtmp");                        
-        case '-':
-            return llvmModule.irBuilder->CreateFSub(l, r, "subtmp");
-        case '/':
-            return llvmModule.irBuilder->CreateFDiv(l, r, "divtmp");
-        case '*':
-            return llvmModule.irBuilder->CreateFMul(l, r, "multmp");
-        case '<':
-            l = llvmModule.irBuilder->CreateFCmpULT(l, r, "lttmp");
-            // convert bool 0/1 to double 0.0/1.0
-            return llvmModule.irBuilder->CreateUIToFP(
-                l, llvm::Type::getDoubleTy(*(llvmModule.llvmContext)), "boollttmp"
-            );
-        case '>':
-            l = llvmModule.irBuilder->CreateFCmpUGT(l, r, "gttmp");
-            return llvmModule.irBuilder->CreateUIToFP(
-                l, llvm::Type::getDoubleTy(*(llvmModule.llvmContext)), "boolgttmp"
-            );
-        default:
-            logging::logErrorValue("Invalid binary operator.");
-            return nullptr;                            
-    }
-}
-
-llvm::Value* CallExprAST::codeGen(kaleidoscope::LLVMModule& llvmModule)
-{
-    // auto calleeFunc = llvmModule.getFunction(callee);
-    auto calleeFunc = findFunction(callee, llvmModule, protos);
-    if (!calleeFunc)
-    {
-        logging::logErrorValue("Unknown function referenced.");
-        return nullptr;
-    }
-
-    if (calleeFunc->arg_size() != args.size())
-    {
-        logging::logErrorValue("Incorrect # arguments passed.");
-        return nullptr;
-    }
-
-    std::vector<llvm::Value*> argsVec;
-    for (unsigned i = 0, e = args.size(); i != e; ++i)
-    {
-        argsVec.push_back(args[i]->codeGen(llvmModule));
-        if (!argsVec.back())
-        {
-            return nullptr;
-        }
-    }
-
-    return llvmModule.irBuilder->CreateCall(calleeFunc, argsVec, "calltmp");
-}
-
-llvm::Function* PrototypeAST::codeGen(kaleidoscope::LLVMModule& llvmModule)
-{
-    std::vector<llvm::Type*> doubles(args.size(), llvm::Type::getDoubleTy(*(llvmModule.llvmContext)));
-    auto fType = llvm::FunctionType::get(llvm::Type::getDoubleTy(*(llvmModule.llvmContext)), doubles, false);
-    auto func = llvm::Function::Create(fType, llvm::Function::ExternalLinkage, name, llvmModule.llvmModule.get());
-
-    unsigned index = 0;
-    for (auto& arg : func->args())
-    {
-        arg.setName(args[index++]);
-    }
-
-    return func;
-}
-
-llvm::Function* FunctionAST::codeGen(kaleidoscope::LLVMModule& llvmModule,
-                                     std::map<std::string, std::unique_ptr<PrototypeAST>>& functionProtos)
-{
-    // transfer ownership of the prototype to the functionProtos map,
-    // but keep a reference to it for use below
-    auto& p = *proto;
-    functionProtos[proto->getName()] = std::move(proto);    
-    auto func = findFunction(p.getName(), llvmModule, functionProtos);
-
-    if (!func)
-    {
-        return nullptr;
-    }
-
-    // if (!func->empty())
-    // {
-    // 	logging::logErrorValue("Function cannot be redefined.");
-    // 	return nullptr;
-    // }
-
-    // create a new basic block to start insertion into
-    auto block = llvm::BasicBlock::Create(*(llvmModule.llvmContext), "entry", func);
-    llvmModule.irBuilder->SetInsertPoint(block);
-
-    // clear the map and record the function arguments there
-    llvmModule.namedValues.clear();
-    for (auto& arg : func->args())
-    {
-        llvmModule.namedValues[std::string(arg.getName())] = &arg;
-    }
-
-    if (auto returnValue = body->codeGen(llvmModule))
-    {
-        // finish off the function and validate it
-        llvmModule.irBuilder->CreateRet(returnValue);
-        llvm::verifyFunction(*func);        
-        llvmModule.passManager->run(*func);
-        return func;
-    }
-
-    // erase the function from memory if there was a problem
-    func->eraseFromParent();
-    return func;
-}
-
-llvm::Value* IfExprAST::codeGen(kaleidoscope::LLVMModule& llvmModule)
-{
-    auto condValue = condition->codeGen(llvmModule);
-    if (!condValue)
-    {
-        return nullptr;
-    }
-
-    auto& builder = llvmModule.irBuilder;
-
-    // convert condition to a bool by comparing non-equal to 0.0
-    condValue = builder->CreateFCmpONE(
-        condValue, llvm::ConstantFP::get(*(llvmModule.llvmContext), llvm::APFloat(0.0)), "ifcond");
-
-    auto func = builder->GetInsertBlock()->getParent();
-
-    // create blocks for the then and else cases
-    // insert the 'then' block at the end of the function
-    auto thenBlock = llvm::BasicBlock::Create(*(llvmModule.llvmContext), "then", func);
-    auto elseBlock = llvm::BasicBlock::Create(*(llvmModule.llvmContext), "else");
-    auto mergeBlock = llvm::BasicBlock::Create(*(llvmModule.llvmContext), "ifcont");
-
-    builder->CreateCondBr(condValue, thenBlock, elseBlock);
-
-    builder->SetInsertPoint(thenBlock);
-
-    // emit then value
-    auto thenValue = thenExpr->codeGen(llvmModule);
-    if (!thenValue)
-    {
-        return nullptr;
-    }
-
-    // codegen of 'then' can change the current block, update thenBlock for the PHI
-    builder->CreateBr(mergeBlock);
-    thenBlock = builder->GetInsertBlock();
-
-    // emit else block
-    func->getBasicBlockList().push_back(elseBlock);
-    builder->SetInsertPoint(elseBlock);
-
-    auto elseValue = elseExpr->codeGen(llvmModule);
-    if (!elseValue)
-    {
-        return nullptr;
-    }
-
-    builder->CreateBr(mergeBlock);
-    elseBlock = builder->GetInsertBlock();
-
-    // emit merge block
-    func->getBasicBlockList().push_back(mergeBlock);
-    builder->SetInsertPoint(mergeBlock);
-
-    auto phiNode = builder->CreatePHI(
-        llvm::Type::getDoubleTy(*(llvmModule.llvmContext)), 2, "iftmp");
-
-    phiNode->addIncoming(thenValue, thenBlock);
-    phiNode->addIncoming(elseValue, elseBlock);
-    return phiNode;
-}
-
-llvm::Value* ForExprAST::codeGen(kaleidoscope::LLVMModule& llvmModule)
-{
-    // emit the start code first, without variable in scope
-    auto startValue = start->codeGen(llvmModule);
-    if (!startValue)
-    {
-        return nullptr;
-    }
-
-    auto& builder = llvmModule.irBuilder;
-    auto& context = llvmModule.llvmContext;
-
-    // make the new basic block for the loop header,
-    // inserting after current block
-    auto func = builder->GetInsertBlock()->getParent();
-    auto preHeaderBlock = builder->GetInsertBlock();
-    auto loopBlock = llvm::BasicBlock::Create(*context, "loop", func);
-    // insert an explicit fall through from the current block
-    // to the loop block
-    builder->CreateBr(loopBlock);
-
-    // start insertion into loopBlock
-    builder->SetInsertPoint(loopBlock);
-    // start the phi node with an entry for start block
-    auto variable = builder->CreatePHI(llvm::Type::getDoubleTy(*context), 2, varName.c_str());
-    variable->addIncoming(startValue, preHeaderBlock);
-
-    // within the loop, the variable is defined equal to the phi node
-    // if it shadows an existing variable, we have to restore it
-    // so save it for now
-    auto oldVal = llvmModule.namedValues[varName];
-    llvmModule.namedValues[varName] = variable;
-
-    // emit the body of the loop.
-    // this can change the current block
-    // ignore value computed by the body, but dont allow an error
-    if (!body->codeGen(llvmModule))
-    {
-        return nullptr;
-    }
-
-    llvm::Value* stepValue = nullptr;
-    if (step)
-    {        
-        stepValue = step->codeGen(llvmModule);
-        if (!stepValue)
-        {
-            return nullptr;
-        }
-    }
-    else
-    {        
-        // if not specified, use 1.0
-        stepValue = llvm::ConstantFP::get(*context, llvm::APFloat(2.0));
-    }
-
-    auto nextVar = builder->CreateFAdd(variable, stepValue, "nextvar");
-
-    // compute the end condition
-    auto endCond = end->codeGen(llvmModule);
-    if (!endCond)
-    {
-        return nullptr;
-    }
-
-    // convert condition to bool
-    endCond = builder->CreateFCmpONE(
-        endCond, llvm::ConstantFP::get(*context, llvm::APFloat(0.0)), "loopcond"
-    );
-
-    // create the after loop block and insert it 
-    auto loopEndBlock = builder->GetInsertBlock();
-    auto afterBlock = llvm::BasicBlock::Create(*context, "afterloop", func);
-
-    // insert the conditional branch into the end of loopEndBlock
-    builder->CreateCondBr(endCond, loopBlock, afterBlock);
-
-    // any new code will be inserted in afterBlock
-    builder->SetInsertPoint(afterBlock);
-
-    // add new entry point to the phi node
-    variable->addIncoming(nextVar, loopEndBlock);
-
-    // restore the unshadowed variable
-    if (oldVal)
-    {
-        llvmModule.namedValues[varName] = oldVal;
-    }
-    else 
-    {
-        llvmModule.namedValues.erase(varName);
-    }
-
-    return llvm::Constant::getNullValue(llvm::Type::getDoubleTy(*context));
-}
-
-// =================== Parser ===================
+using namespace kaleidoscope::ast;
 
 Parser::Parser()
 {
@@ -350,21 +48,21 @@ void Parser::mainLoop()
 
 void Parser::initModuleAndPassManager()
 {
-    llvmModule.doInit(kaleidoscopeJit.get());
+    llvmTools.doInit(kaleidoscopeJit.get());
 }
 
 void Parser::handleDefinition()
 {
     if (auto funcAst = parseDefinition())
     {
-        if (auto funcIr = funcAst->codeGen(llvmModule, functionProtos))
+        if (auto funcIr = funcAst->codeGen(llvmTools, functionProtos))
         {
             fprintf(stderr, "Read function definition: \n");
             funcIr->print(llvm::errs());
             fprintf(stderr, "\n");
             exitOnError(kaleidoscopeJit->addModule(
-                llvm::orc::ThreadSafeModule(std::move(llvmModule.llvmModule), 
-                std::move(llvmModule.llvmContext))));
+                llvm::orc::ThreadSafeModule(std::move(llvmTools.llvmModule), 
+                std::move(llvmTools.llvmContext))));
             initModuleAndPassManager();
         }					
     }
@@ -378,7 +76,7 @@ void Parser::handleExtern()
 {
     if (auto funcAst = parseExtern())
     {
-        if (auto funcIr = funcAst->codeGen(llvmModule))
+        if (auto funcIr = funcAst->codeGen(llvmTools))
         {
             fprintf(stderr, "Read extern: \n");
             funcIr->print(llvm::errs());
@@ -396,14 +94,14 @@ void Parser::handleTopLevelExpression()
 {
     if (auto funcAst = parseTopLevelExpr())
     {
-        if (funcAst->codeGen(llvmModule, functionProtos))
+        if (funcAst->codeGen(llvmTools, functionProtos))
         {
             // jit the module containing the anonymous expression,
             // keeping a handle on it so we can free it later
             auto resourceTracker = kaleidoscopeJit->getMainJITDylib().createResourceTracker();
             
-            auto tsm = llvm::orc::ThreadSafeModule(std::move(llvmModule.llvmModule), 
-                std::move(llvmModule.llvmContext));
+            auto tsm = llvm::orc::ThreadSafeModule(std::move(llvmTools.llvmModule), 
+                std::move(llvmTools.llvmContext));
             exitOnError(kaleidoscopeJit->addModule(std::move(tsm), resourceTracker));
             initModuleAndPassManager();
 
@@ -617,10 +315,8 @@ std::unique_ptr<ExprAST> Parser::parseIdentifierExpr()
 // call when current token is a number. 
 // creates a node then advances the lexer to the next token before returning it.
 std::unique_ptr<ExprAST> Parser::parseNumberExpr()
-{
-    auto val = lexer.getNumValue();
-    fprintf(stderr, "%f\n", val);
-    auto result = std::make_unique<NumberExprAST>(val);
+{        
+    auto result = std::make_unique<NumberExprAST>(lexer.getNumValue());
     getNextToken();
     return std::move(result);
 }
