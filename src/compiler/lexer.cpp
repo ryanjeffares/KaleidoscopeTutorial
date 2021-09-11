@@ -30,6 +30,26 @@ int Lexer::getToken()
         {
             return Token::TOK_EXTERN;
         }
+        if (identifierStr == "if")
+        {
+            return Token::TOK_IF;
+        }
+        if (identifierStr == "then")
+        {
+            return Token::TOK_THEN;
+        }
+        if (identifierStr == "else")
+        {
+            return Token::TOK_ELSE;
+        }
+        if (identifierStr == "for")
+        {
+            return Token::TOK_FOR;
+        }
+        if (identifierStr == "in")
+        {
+            return Token::TOK_IN;
+        }
 
         return Token::TOK_IDENT;
     }

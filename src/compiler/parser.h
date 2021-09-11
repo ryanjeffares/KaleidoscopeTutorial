@@ -107,7 +107,38 @@ namespace kaleidoscope
         private:
             std::unique_ptr<PrototypeAST> proto;
             std::unique_ptr<ExprAST> body;
-        };        
+        };
+
+        class IfExprAST : public ExprAST
+        {
+        public:
+            IfExprAST(std::unique_ptr<ExprAST> cond, std::unique_ptr<ExprAST> then,
+                      std::unique_ptr<ExprAST> els) 
+                      : condition(std::move(cond)), thenExpr(std::move(then)), elseExpr(std::move(els)) {}
+
+            llvm::Value* codeGen(kaleidoscope::LLVMModule&) override;
+
+        private:
+            std::unique_ptr<ExprAST> condition, thenExpr, elseExpr;
+        };
+
+        class ForExprAST : public ExprAST
+        {
+        public:
+            ForExprAST(const std::string& name, 
+                       std::unique_ptr<ExprAST> strt,
+                       std::unique_ptr<ExprAST> en,
+                       std::unique_ptr<ExprAST> stp,
+                       std::unique_ptr<ExprAST> bd)
+                       : varName(std::move(name)), start(std::move(strt)),
+                         end(std::move(en)), step(std::move(stp)), 
+                         body(std::move(bd)) {}
+
+            llvm::Value* codeGen(kaleidoscope::LLVMModule&) override;
+        private:
+            std::string varName;
+            std::unique_ptr<ExprAST> start, end, step, body;
+        };
 
 		// the parser, which will build our abstract syntax tree.
 		class Parser
@@ -175,6 +206,12 @@ namespace kaleidoscope
 			// call when current token is an open parenthesis.
 			// checks for closing parenthesis, and eats both.
 			std::unique_ptr<ExprAST> parseParenExpr();
+
+            // parses an if/then/else expression
+            std::unique_ptr<ExprAST> parseIfExpr();
+
+            // parses a for loop expression
+            std::unique_ptr<ExprAST> parseForExpr();
 
 			int getTokPrecedence();			
 

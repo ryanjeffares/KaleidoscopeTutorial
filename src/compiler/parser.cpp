@@ -40,9 +40,16 @@ llvm::Value* BinaryExprAST::codeGen(kaleidoscope::LLVMModule& llvmModule)
         case '*':
             return llvmModule.irBuilder->CreateFMul(l, r, "multmp");
         case '<':
-            l = llvmModule.irBuilder->CreateFCmpULT(l, r, "cmptmp");
+            l = llvmModule.irBuilder->CreateFCmpULT(l, r, "lttmp");
             // convert bool 0/1 to double 0.0/1.0
-            return llvmModule.irBuilder->CreateUIToFP(l, llvm::Type::getDoubleTy(*(llvmModule.llvmContext)), "booltmp");
+            return llvmModule.irBuilder->CreateUIToFP(
+                l, llvm::Type::getDoubleTy(*(llvmModule.llvmContext)), "boollttmp"
+            );
+        case '>':
+            l = llvmModule.irBuilder->CreateFCmpUGT(l, r, "gttmp");
+            return llvmModule.irBuilder->CreateUIToFP(
+                l, llvm::Type::getDoubleTy(*(llvmModule.llvmContext)), "boolgttmp"
+            );
         default:
             logging::logErrorValue("Invalid binary operator.");
             return nullptr;                            
@@ -137,17 +144,176 @@ llvm::Function* FunctionAST::codeGen(kaleidoscope::LLVMModule& llvmModule,
     func->eraseFromParent();
     return func;
 }
-                
+
+llvm::Value* IfExprAST::codeGen(kaleidoscope::LLVMModule& llvmModule)
+{
+    auto condValue = condition->codeGen(llvmModule);
+    if (!condValue)
+    {
+        return nullptr;
+    }
+
+    auto& builder = llvmModule.irBuilder;
+
+    // convert condition to a bool by comparing non-equal to 0.0
+    condValue = builder->CreateFCmpONE(
+        condValue, llvm::ConstantFP::get(*(llvmModule.llvmContext), llvm::APFloat(0.0)), "ifcond");
+
+    auto func = builder->GetInsertBlock()->getParent();
+
+    // create blocks for the then and else cases
+    // insert the 'then' block at the end of the function
+    auto thenBlock = llvm::BasicBlock::Create(*(llvmModule.llvmContext), "then", func);
+    auto elseBlock = llvm::BasicBlock::Create(*(llvmModule.llvmContext), "else");
+    auto mergeBlock = llvm::BasicBlock::Create(*(llvmModule.llvmContext), "ifcont");
+
+    builder->CreateCondBr(condValue, thenBlock, elseBlock);
+
+    builder->SetInsertPoint(thenBlock);
+
+    // emit then value
+    auto thenValue = thenExpr->codeGen(llvmModule);
+    if (!thenValue)
+    {
+        return nullptr;
+    }
+
+    // codegen of 'then' can change the current block, update thenBlock for the PHI
+    builder->CreateBr(mergeBlock);
+    thenBlock = builder->GetInsertBlock();
+
+    // emit else block
+    func->getBasicBlockList().push_back(elseBlock);
+    builder->SetInsertPoint(elseBlock);
+
+    auto elseValue = elseExpr->codeGen(llvmModule);
+    if (!elseValue)
+    {
+        return nullptr;
+    }
+
+    builder->CreateBr(mergeBlock);
+    elseBlock = builder->GetInsertBlock();
+
+    // emit merge block
+    func->getBasicBlockList().push_back(mergeBlock);
+    builder->SetInsertPoint(mergeBlock);
+
+    auto phiNode = builder->CreatePHI(
+        llvm::Type::getDoubleTy(*(llvmModule.llvmContext)), 2, "iftmp");
+
+    phiNode->addIncoming(thenValue, thenBlock);
+    phiNode->addIncoming(elseValue, elseBlock);
+    return phiNode;
+}
+
+llvm::Value* ForExprAST::codeGen(kaleidoscope::LLVMModule& llvmModule)
+{
+    // emit the start code first, without variable in scope
+    auto startValue = start->codeGen(llvmModule);
+    if (!startValue)
+    {
+        return nullptr;
+    }
+
+    auto& builder = llvmModule.irBuilder;
+    auto& context = llvmModule.llvmContext;
+
+    // make the new basic block for the loop header,
+    // inserting after current block
+    auto func = builder->GetInsertBlock()->getParent();
+    auto preHeaderBlock = builder->GetInsertBlock();
+    auto loopBlock = llvm::BasicBlock::Create(*context, "loop", func);
+    // insert an explicit fall through from the current block
+    // to the loop block
+    builder->CreateBr(loopBlock);
+
+    // start insertion into loopBlock
+    builder->SetInsertPoint(loopBlock);
+    // start the phi node with an entry for start block
+    auto variable = builder->CreatePHI(llvm::Type::getDoubleTy(*context), 2, varName.c_str());
+    variable->addIncoming(startValue, preHeaderBlock);
+
+    // within the loop, the variable is defined equal to the phi node
+    // if it shadows an existing variable, we have to restore it
+    // so save it for now
+    auto oldVal = llvmModule.namedValues[varName];
+    llvmModule.namedValues[varName] = variable;
+
+    // emit the body of the loop.
+    // this can change the current block
+    // ignore value computed by the body, but dont allow an error
+    if (!body->codeGen(llvmModule))
+    {
+        return nullptr;
+    }
+
+    llvm::Value* stepValue = nullptr;
+    if (step)
+    {        
+        stepValue = step->codeGen(llvmModule);
+        if (!stepValue)
+        {
+            return nullptr;
+        }
+    }
+    else
+    {        
+        // if not specified, use 1.0
+        stepValue = llvm::ConstantFP::get(*context, llvm::APFloat(2.0));
+    }
+
+    auto nextVar = builder->CreateFAdd(variable, stepValue, "nextvar");
+
+    // compute the end condition
+    auto endCond = end->codeGen(llvmModule);
+    if (!endCond)
+    {
+        return nullptr;
+    }
+
+    // convert condition to bool
+    endCond = builder->CreateFCmpONE(
+        endCond, llvm::ConstantFP::get(*context, llvm::APFloat(0.0)), "loopcond"
+    );
+
+    // create the after loop block and insert it 
+    auto loopEndBlock = builder->GetInsertBlock();
+    auto afterBlock = llvm::BasicBlock::Create(*context, "afterloop", func);
+
+    // insert the conditional branch into the end of loopEndBlock
+    builder->CreateCondBr(endCond, loopBlock, afterBlock);
+
+    // any new code will be inserted in afterBlock
+    builder->SetInsertPoint(afterBlock);
+
+    // add new entry point to the phi node
+    variable->addIncoming(nextVar, loopEndBlock);
+
+    // restore the unshadowed variable
+    if (oldVal)
+    {
+        llvmModule.namedValues[varName] = oldVal;
+    }
+    else 
+    {
+        llvmModule.namedValues.erase(varName);
+    }
+
+    return llvm::Constant::getNullValue(llvm::Type::getDoubleTy(*context));
+}
+
 // =================== Parser ===================
 
 Parser::Parser()
 {
-    kaleidoscopeJit = exitOnError(llvm::orc::KaleidoscopeJIT::Create());
+    kaleidoscopeJit = exitOnError(llvm::orc::KaleidoscopeJIT::Create());    
     binopPrecedence['<'] = 10;
-    binopPrecedence['+'] = 20;
-    binopPrecedence['-'] = 30;
-    binopPrecedence['/'] = 40;
-    binopPrecedence['*'] = 50;
+    binopPrecedence['>'] = 20;
+    binopPrecedence['+'] = 30;
+    binopPrecedence['-'] = 40;
+    binopPrecedence['/'] = 50;
+    binopPrecedence['*'] = 60;
 }	
 
 void Parser::run()
@@ -247,7 +413,7 @@ void Parser::handleTopLevelExpression()
             // get the symbol's address and cast it to the right type
             // so we can call it as a native function
             double (*fp)() = (double (*)())(intptr_t)exprSymbol.getAddress();            
-            fprintf(stderr, "Evaluated to %f\n", fp());
+            fprintf(stderr, "%f\n", fp());
                      
             exitOnError(resourceTracker->remove());
         }
@@ -266,6 +432,10 @@ std::unique_ptr<ExprAST> Parser::parsePrimary()
             return parseIdentifierExpr();
         case Lexer::Token::TOK_NUM:
             return parseNumberExpr();
+        case Lexer::Token::TOK_IF:
+            return parseIfExpr();
+        case Lexer::Token::TOK_FOR:
+            return parseForExpr();
         case '(':
             return parseParenExpr();
         default:
@@ -448,7 +618,9 @@ std::unique_ptr<ExprAST> Parser::parseIdentifierExpr()
 // creates a node then advances the lexer to the next token before returning it.
 std::unique_ptr<ExprAST> Parser::parseNumberExpr()
 {
-    auto result = std::make_unique<NumberExprAST>(lexer.getNumValue());
+    auto val = lexer.getNumValue();
+    fprintf(stderr, "%f\n", val);
+    auto result = std::make_unique<NumberExprAST>(val);
     getNextToken();
     return std::move(result);
 }
@@ -470,6 +642,128 @@ std::unique_ptr<ExprAST> Parser::parseParenExpr()
     }
     getNextToken();
     return v;
+}
+
+std::unique_ptr<ExprAST> Parser::parseIfExpr()
+{
+    // eat the if
+    getNextToken();
+
+    // parse the condition expression
+    auto condition = parseExpression();
+    if (!condition)
+    {
+        return nullptr;
+    }
+
+    if (currentToken != Lexer::Token::TOK_THEN)
+    {
+        logging::logErrorToken("Expected 'then'");
+        return nullptr;
+    }
+
+    // eat the then
+    getNextToken();
+
+    // parse then then expression
+    auto thenExpr = parseExpression();
+    if (!thenExpr)
+    {
+        return nullptr;
+    }
+
+    if (currentToken != Lexer::Token::TOK_ELSE)
+    {
+        logging::logErrorToken("Expected 'else'");
+        return nullptr;
+    }
+
+    // eat the else
+    getNextToken();
+
+    // parse the else expression
+    auto elseExpr = parseExpression();
+    if (!elseExpr)
+    {
+        return nullptr;
+    }
+
+    return std::make_unique<IfExprAST>(std::move(condition), std::move(thenExpr), 
+                                       std::move(elseExpr));
+}
+
+std::unique_ptr<ExprAST> Parser::parseForExpr()
+{
+    // eat the for
+    getNextToken();
+
+    if (currentToken != Lexer::Token::TOK_IDENT)
+    {
+        logging::logErrorToken("Expected identifier after for.");
+        return nullptr;
+    }
+
+    // eat the ident but save it
+    std::string idName = lexer.getIdentStr();
+    getNextToken(); 
+
+    if (currentToken != '=')
+    {
+        logging::logErrorToken("Expected = after for.");
+        return nullptr;
+    }
+
+    // eat =
+    getNextToken();
+
+    auto start = parseExpression();
+    if (!start)
+    {
+        return nullptr;
+    }
+
+    if (currentToken != ',')
+    {
+        logging::logErrorToken("Expected ',' after for start value.");
+        return nullptr;
+    }
+
+    getNextToken();
+
+    auto end = parseExpression();
+    if (!end)
+    {
+        return nullptr;
+    }
+
+    // the step value is optional
+    std::unique_ptr<ExprAST> step;
+    if (currentToken == ',')
+    {
+        getNextToken();
+        step = parseExpression();        
+        if (!step)
+        {
+            return nullptr;
+        }
+    }
+
+    if (currentToken != Lexer::Token::TOK_IN)
+    {
+        logging::logErrorToken("Expected 'in' after for.");
+        return nullptr;
+    }
+
+    getNextToken();
+
+    auto body = parseExpression();
+    if (!body)
+    {
+        return nullptr;
+    }
+
+    return std::make_unique<ForExprAST>(idName, std::move(start), std::move(end), 
+                                        std::move(step), std::move(body));
 }
 
 int Parser::getTokPrecedence()
