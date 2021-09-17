@@ -1,5 +1,7 @@
 #pragma once
 
+#include <iostream>
+
 #include "includellvm.h"
 #include "llvmmodule.h"
 
@@ -46,7 +48,8 @@ namespace kaleidoscope
         public:
             PrototypeAST(const std::string& n, std::vector<std::string> a,
                          bool isOp = false, unsigned prec = 0)
-                         : name(n), args(std::move(a)) {}
+                         : name(n), args(std::move(a)), 
+                           isOperator(isOp), precedence(prec) {}
 
             llvm::Function* codeGen(kaleidoscope::LLVMTools&);
 

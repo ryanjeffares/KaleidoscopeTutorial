@@ -68,7 +68,7 @@ llvm::Value* UnaryExprAST::codeGen(kaleidoscope::LLVMTools& llvmTools)
     if (!operandValue)
     {
         return nullptr;
-    }
+    }    
 
     auto func = findFunction(std::string("unary") + opcode, llvmTools, protos);
     if (!func)
@@ -164,6 +164,12 @@ llvm::Function* FunctionAST::codeGen(kaleidoscope::LLVMTools& llvmTools,
 
     // erase the function from memory if there was a problem
     func->eraseFromParent();
+
+    if (p.isBinaryOp())
+    {
+        binopPrecedence.erase(p.getOperatorName());
+    }
+    
     return func;
 }
 
@@ -180,7 +186,8 @@ llvm::Value* IfExprAST::codeGen(kaleidoscope::LLVMTools& llvmTools)
 
     // convert condition to a bool by comparing non-equal to 0.0
     condValue = builder->CreateFCmpONE(
-        condValue, llvm::ConstantFP::get(*context, llvm::APFloat(0.0)), "ifcond");
+        condValue, llvm::ConstantFP::get(*context, llvm::APFloat(0.0)), "ifcond"
+    );
 
     auto func = builder->GetInsertBlock()->getParent();
 
@@ -223,7 +230,8 @@ llvm::Value* IfExprAST::codeGen(kaleidoscope::LLVMTools& llvmTools)
     builder->SetInsertPoint(mergeBlock);
 
     auto phiNode = builder->CreatePHI(
-        llvm::Type::getDoubleTy(*context), 2, "iftmp");
+        llvm::Type::getDoubleTy(*context), 2, "iftmp"
+    );
 
     phiNode->addIncoming(thenValue, thenBlock);
     phiNode->addIncoming(elseValue, elseBlock);

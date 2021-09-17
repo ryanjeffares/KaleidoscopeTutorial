@@ -14,8 +14,8 @@ Parser::Parser()
 
 void Parser::run()
 {
-    initModuleAndPassManager();
     getNextToken();    
+    initModuleAndPassManager();
     mainLoop();
 }
 
@@ -223,7 +223,7 @@ std::unique_ptr<PrototypeAST> Parser::parsePrototype()
     }
 
     return std::make_unique<PrototypeAST>(
-        funcName, std::move(argNames), kind != 0, binaryPrecedence
+        funcName, argNames, kind != 0, binaryPrecedence
     );
 }
             

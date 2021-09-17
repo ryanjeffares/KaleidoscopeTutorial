@@ -40,10 +40,8 @@ int Lexer::getToken()
         {
             return it->second;
         }
-        else  
-        {
-            return Token::TOK_IDENT;
-        }        
+                
+        return Token::TOK_IDENT;
     }
 
     // parse a number and a decimal point if it has it.
