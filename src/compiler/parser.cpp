@@ -5,11 +5,14 @@ using namespace kaleidoscope::ast;
 
 Parser::Parser()
 {
-    kaleidoscopeJit = exitOnError(llvm::orc::KaleidoscopeJIT::Create());    
+    kaleidoscopeJit = exitOnError(llvm::orc::KaleidoscopeJIT::Create());  
+    binopPrecedence['='] = 2;  
     binopPrecedence['<'] = 10;
+    binopPrecedence['>'] = 10;    
     binopPrecedence['+'] = 20;
     binopPrecedence['-'] = 20;    
-    binopPrecedence['*'] = 40;
+    binopPrecedence['*'] = 30;
+    binopPrecedence['/'] = 30;
 }	
 
 void Parser::run()
@@ -19,9 +22,63 @@ void Parser::run()
     mainLoop();
 }
 
+bool Parser::writeToFile()
+{
+    auto& llvmModule = llvmTools.llvmModule;
+
+    auto targetTriple = llvm::sys::getDefaultTargetTriple();
+    llvmModule->setTargetTriple(targetTriple);
+
+    std::string error;
+    auto target = llvm::TargetRegistry::lookupTarget(targetTriple, error);
+
+    if (!target)
+    {
+        llvm::errs() << error;
+        return false;
+    }
+
+    auto cpu = "generic";
+    auto features = "";
+
+    llvm::TargetOptions options;
+    auto rm = llvm::Optional<llvm::Reloc::Model>();
+    auto targetMachine = target->createTargetMachine(
+        targetTriple, cpu, features, options, rm
+    );
+
+    llvmModule->setDataLayout(targetMachine->createDataLayout());
+
+    auto fileName = "output.o";
+    std::error_code errorCode;
+    llvm::raw_fd_ostream dest(fileName, errorCode, llvm::sys::fs::OF_None);
+
+    if (errorCode)
+    {
+        llvm::errs() << "Could not open file: " << errorCode.message();
+        return false;
+    }
+
+    llvm::legacy::PassManager passManager;
+    auto fileType = llvm::CGFT_ObjectFile;
+
+    if (targetMachine->addPassesToEmitFile(passManager, dest, nullptr, fileType))
+    {
+        llvm::errs() << "targetMachine can't emit a file of this type.";
+        return false;
+    }
+
+    passManager.run(*llvmModule);
+    dest.flush();
+
+    llvm::outs() << "Wrote " << fileName << "\n";
+
+    return true;
+}
+
 void Parser::mainLoop()
 {                
-    while (1)
+    while (true)
     {
         fprintf(stderr, "ready> ");
         switch (currentToken)
@@ -46,7 +103,7 @@ void Parser::mainLoop()
 
 void Parser::initModuleAndPassManager()
 {
-    llvmTools.doInit(kaleidoscopeJit.get());
+    llvmTools.doInit();
 }
 
 void Parser::handleDefinition()
@@ -58,11 +115,6 @@ void Parser::handleDefinition()
             fprintf(stderr, "Read function definition: \n");
             funcIr->print(llvm::errs());
             fprintf(stderr, "\n");
-            exitOnError(kaleidoscopeJit->addModule(
-                llvm::orc::ThreadSafeModule(std::move(llvmTools.llvmModule), 
-                std::move(llvmTools.llvmContext)))
-            );
-            initModuleAndPassManager();
         }					
     }
     else 
@@ -93,27 +145,7 @@ void Parser::handleTopLevelExpression()
 {
     if (auto funcAst = parseTopLevelExpr())
     {
-        if (funcAst->codeGen(llvmTools, functionProtos))
-        {
-            // jit the module containing the anonymous expression,
-            // keeping a handle on it so we can free it later
-            auto resourceTracker = kaleidoscopeJit->getMainJITDylib().createResourceTracker();
-            
-            auto tsm = llvm::orc::ThreadSafeModule(std::move(llvmTools.llvmModule), 
-                std::move(llvmTools.llvmContext));
-            exitOnError(kaleidoscopeJit->addModule(std::move(tsm), resourceTracker));
-            initModuleAndPassManager();
-
-            // search the jit for the __anon_expr symbol
-            auto exprSymbol = exitOnError(kaleidoscopeJit->lookup("__anon_expr"));
-
-            // get the symbol's address and cast it to the right type
-            // so we can call it as a native function
-            double (*fp)() = (double (*)())(intptr_t)exprSymbol.getAddress();            
-            fprintf(stderr, "%f\n", fp());
-                     
-            exitOnError(resourceTracker->remove());
-        }
+        funcAst->codeGen(llvmTools, functionProtos);        
     }
     else 
     {
@@ -133,6 +165,8 @@ std::unique_ptr<ExprAST> Parser::parsePrimary()
             return parseIfExpr();
         case Lexer::Token::TOK_FOR:
             return parseForExpr();
+        case Lexer::Token::TOK_VAR:
+            return parseVarExpr();
         case '(':
             return parseParenExpr();
         default:
@@ -282,7 +316,7 @@ std::unique_ptr<ExprAST> Parser::parseExpression()
 // gets the right hand side of a binary expression
 std::unique_ptr<ExprAST> Parser::parseBinOpRhs(int exprPrec, std::unique_ptr<ExprAST> lhs)
 {
-    while (1)
+    while (true)
     {
         int tokPrec = getTokPrecedence();
 
@@ -360,7 +394,7 @@ std::unique_ptr<ExprAST> Parser::parseIdentifierExpr()
     std::vector<std::unique_ptr<ExprAST>> args;
     if (currentToken != ')')
     {
-        while (1)
+        while (true)
         {
             if (auto arg = parseExpression())
             {
@@ -539,6 +573,70 @@ std::unique_ptr<ExprAST> Parser::parseForExpr()
 
     return std::make_unique<ForExprAST>(idName, std::move(start), std::move(end), 
                                         std::move(step), std::move(body));
+}
+
+std::unique_ptr<ExprAST> Parser::parseVarExpr()
+{
+    // eat 'var'
+    getNextToken();
+
+    std::vector<std::pair<std::string, std::unique_ptr<ExprAST>>> varNames;
+
+    if (currentToken != Lexer::Token::TOK_IDENT)
+    {
+        logging::logErrorValue("Expected identifier after 'var'.");
+        return nullptr;
+    }
+
+    while (true)
+    {
+        auto name = lexer.getIdentStr();
+        getNextToken();
+
+        std::unique_ptr<ExprAST> init;
+        if (currentToken == '=')
+        {
+            getNextToken();
+            init = parseExpression();
+            if (!init)
+            {
+                return nullptr;
+            }
+        }
+
+        varNames.push_back(std::make_pair(name, std::move(init)));
+
+        if (currentToken != ',')
+        {
+            break;
+        }
+
+        getNextToken();
+
+        if (currentToken != Lexer::Token::TOK_IDENT)
+        {
+            logging::logErrorValue("Expected identifier list after 'var'.");
+            return nullptr;
+        }
+    }
+
+    if (currentToken != Lexer::Token::TOK_IN)
+    {
+        logging::logErrorValue("Expected 'in' after 'var'.");
+        return nullptr;
+    }
+
+    getNextToken();
+
+    auto body = parseExpression();
+    if (!body)
+    {
+        return nullptr;
+    }
+
+    return std::make_unique<VarExprAST>(
+        std::move(varNames), std::move(body)
+    );
 }
 
 int Parser::getTokPrecedence()

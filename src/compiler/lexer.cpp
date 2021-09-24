@@ -12,7 +12,8 @@ Lexer::Lexer() : lastChar(' ')
     tokenLookup["for"] = Token::TOK_FOR;
     tokenLookup["in"] = Token::TOK_IN;
     tokenLookup["unary"] = Token::TOK_UNARY;
-    tokenLookup["binary"] = Token::TOK_BINARY; 
+    tokenLookup["binary"] = Token::TOK_BINARY;
+    tokenLookup["var"] = Token::TOK_VAR;
 }
 
 int Lexer::getToken()
@@ -29,7 +30,7 @@ int Lexer::getToken()
         // set our identifier to this char, and then append following chars until 
         // the next char is not alphanumeric
         identifierStr = lastChar;
-        while (isalnum((lastChar = getchar())))
+        while (isValidIdentChar((lastChar = getchar())))
         {
             identifierStr += lastChar;
         }
@@ -84,4 +85,9 @@ int Lexer::getToken()
     int thisChar = lastChar;
     lastChar = getchar();
     return thisChar;
+}
+
+bool Lexer::isValidIdentChar(int c)
+{
+    return isalnum(c) || c == '_';
 }

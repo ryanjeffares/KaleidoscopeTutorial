@@ -8,18 +8,109 @@ llvm::Value* NumberExprAST::codeGen(kaleidoscope::LLVMTools& llvmTools)
     return llvm::ConstantFP::get(*(llvmTools.llvmContext), llvm::APFloat(value));
 }
 
+llvm::Value* VarExprAST::codeGen(kaleidoscope::LLVMTools& llvmTools)
+{
+    auto& builder = llvmTools.irBuilder;
+    auto& context = llvmTools.llvmContext;
+
+    std::vector<llvm::AllocaInst*> oldBindings;
+    
+    auto func = builder->GetInsertBlock()->getParent();
+
+    // register all variables and emit their initializer
+    for (auto i = 0; i < varNames.size(); i++)
+    {
+        const std::string& varName = varNames[i].first;
+        auto init = varNames[i].second.get();
+
+        // emit the initializer before adding variable to scope
+        // this prevents the initializer from referencing the variable itself,
+        // and permits stuff like this:
+        // var a = 1 in 
+        //  var a = a in...
+        llvm::Value* initValue;
+        if (init)
+        {
+            initValue = init->codeGen(llvmTools);
+            if (!initValue)
+            {
+                return nullptr;
+            }
+        }
+        else  
+        {
+            initValue = llvm::ConstantFP::get(*context, llvm::APFloat(0.0));
+        }
+
+        auto alloca = createEntryBlockAlloca(func, varName, llvmTools);
+        builder->CreateStore(initValue, alloca);
+
+        // remember old binding so we can restore when we unrecurse
+        oldBindings.push_back(llvmTools.namedValues[varName]);
+        llvmTools.namedValues[varName] = alloca;
+    }
+
+    auto bodyValue = body->codeGen(llvmTools);
+    if (!bodyValue)
+    {
+        return nullptr;
+    }
+
+    for (auto i = 0; i < varNames.size(); i++)
+    {
+        llvmTools.namedValues[varNames[i].first] = oldBindings[i];
+    }
+
+    return bodyValue;
+}
+
 llvm::Value* VariableExprAST::codeGen(kaleidoscope::LLVMTools& llvmTools)
 {
-    auto v = llvmTools.namedValues[name];
-    if (!v)
+    auto alloca = llvmTools.namedValues[name];
+    if (!alloca)
     {
         logging::logErrorValue("Unknown variable name.");                        
     }
-    return v;
+    return llvmTools.irBuilder->CreateLoad(
+        alloca->getAllocatedType(), alloca, name.c_str()
+    );
 } 
 
 llvm::Value* BinaryExprAST::codeGen(kaleidoscope::LLVMTools& llvmTools) 
 {
+    auto& builder = llvmTools.irBuilder;
+    auto& context = llvmTools.llvmContext;
+
+    // special case for '=' because the lhs should not be emitted as an expression
+    if (op == '=')
+    {
+        // assignment requires the lhs to be an identifier
+        auto lhse = dynamic_cast<VariableExprAST*>(lhs.get());
+        if (!lhse)
+        {
+            logging::logErrorValue("Destination of '=' must be a variable.");
+            return nullptr;
+        }
+
+        // codegen rhs
+        auto val = rhs->codeGen(llvmTools);
+        if (!val)
+        {
+            return nullptr;
+        }
+
+        // lookup the name
+        auto variable = llvmTools.namedValues[lhse->getName()];
+        if (!variable)
+        {
+            logging::logErrorValue("Unknown variable name.");
+            return nullptr;
+        }
+
+        builder->CreateStore(val, variable);
+        return val;
+    }
+
     auto l = lhs->codeGen(llvmTools);
     auto r = rhs->codeGen(llvmTools);
 
@@ -27,9 +118,7 @@ llvm::Value* BinaryExprAST::codeGen(kaleidoscope::LLVMTools& llvmTools)
     {
         return nullptr;
     }
-
-    auto& builder = llvmTools.irBuilder;
-    auto& context = llvmTools.llvmContext;
+    
     switch (op)
     {
         case '+':
@@ -46,11 +135,11 @@ llvm::Value* BinaryExprAST::codeGen(kaleidoscope::LLVMTools& llvmTools)
             return builder->CreateUIToFP(
                 l, llvm::Type::getDoubleTy(*context), "boollttmp"
             );
-        // case '>':
-        //     l = builder->CreateFCmpUGT(l, r, "gttmp");
-        //     return builder->CreateUIToFP(
-        //         l, llvm::Type::getDoubleTy(*context), "boolgttmp"
-        //     );
+        case '>':
+            l = builder->CreateFCmpUGT(l, r, "gttmp");
+            return builder->CreateUIToFP(
+                l, llvm::Type::getDoubleTy(*context), "boolgttmp"
+            );                    
         default:
             break;                          
     }
@@ -96,7 +185,7 @@ llvm::Value* CallExprAST::codeGen(kaleidoscope::LLVMTools& llvmTools)
     }
 
     std::vector<llvm::Value*> argsVec;
-    for (unsigned i = 0, e = args.size(); i != e; ++i)
+    for (auto i = 0; i < args.size(); i++)
     {
         argsVec.push_back(args[i]->codeGen(llvmTools));
         if (!argsVec.back())
@@ -129,6 +218,7 @@ llvm::Function* FunctionAST::codeGen(kaleidoscope::LLVMTools& llvmTools,
     // transfer ownership of the prototype to the functionProtos map,
     // but keep a reference to it for use below
     auto& p = *proto;
+
     functionProtos[proto->getName()] = std::move(proto);    
     auto func = findFunction(p.getName(), llvmTools, functionProtos);
 
@@ -142,23 +232,26 @@ llvm::Function* FunctionAST::codeGen(kaleidoscope::LLVMTools& llvmTools,
         binopPrecedence[p.getOperatorName()] = p.getBinaryPrecedence();
     }
 
+    auto& builder = llvmTools.irBuilder;
+
     // create a new basic block to start insertion into
     auto block = llvm::BasicBlock::Create(*(llvmTools.llvmContext), "entry", func);
-    llvmTools.irBuilder->SetInsertPoint(block);
+    builder->SetInsertPoint(block);
 
     // clear the map and record the function arguments there
     llvmTools.namedValues.clear();
     for (auto& arg : func->args())
     {
-        llvmTools.namedValues[std::string(arg.getName())] = &arg;
+        auto alloca = createEntryBlockAlloca(func, std::string(arg.getName()), llvmTools);
+        builder->CreateStore(&arg, alloca);
+        llvmTools.namedValues[std::string(arg.getName())] = alloca;
     }
 
     if (auto returnValue = body->codeGen(llvmTools))
     {
         // finish off the function and validate it
-        llvmTools.irBuilder->CreateRet(returnValue);
-        llvm::verifyFunction(*func);        
-        llvmTools.passManager->run(*func);
+        builder->CreateRet(returnValue);
+        llvm::verifyFunction(*func);                
         return func;
     }
 
@@ -169,7 +262,7 @@ llvm::Function* FunctionAST::codeGen(kaleidoscope::LLVMTools& llvmTools,
     {
         binopPrecedence.erase(p.getOperatorName());
     }
-    
+
     return func;
 }
 
@@ -240,6 +333,14 @@ llvm::Value* IfExprAST::codeGen(kaleidoscope::LLVMTools& llvmTools)
 
 llvm::Value* ForExprAST::codeGen(kaleidoscope::LLVMTools& llvmTools)
 {
+    auto& builder = llvmTools.irBuilder;
+    auto& context = llvmTools.llvmContext;
+
+    auto func = builder->GetInsertBlock()->getParent();
+
+    // create an alloca for the variable in the entry block
+    auto alloca = createEntryBlockAlloca(func, varName, llvmTools);
+
     // emit the start code first, without variable in scope
     auto startValue = start->codeGen(llvmTools);
     if (!startValue)
@@ -247,79 +348,73 @@ llvm::Value* ForExprAST::codeGen(kaleidoscope::LLVMTools& llvmTools)
         return nullptr;
     }
 
-    auto& builder = llvmTools.irBuilder;
-    auto& context = llvmTools.llvmContext;
+    // store the value into the alloca
+    builder->CreateStore(startValue, alloca);
 
-    // make the new basic block for the loop header,
-    // inserting after current block
-    auto func = builder->GetInsertBlock()->getParent();
-    auto preHeaderBlock = builder->GetInsertBlock();
+    // make the basic block for the loop heaer, inserting an explicit
+    // fall through from the current block to the loopBlock.
+    // start insertion in loopBlock
     auto loopBlock = llvm::BasicBlock::Create(*context, "loop", func);
-    // insert an explicit fall through from the current block
-    // to the loop block
     builder->CreateBr(loopBlock);
-
-    // start insertion into loopBlock
     builder->SetInsertPoint(loopBlock);
-    // start the phi node with an entry for start block
-    auto variable = builder->CreatePHI(llvm::Type::getDoubleTy(*context), 2, varName.c_str());
-    variable->addIncoming(startValue, preHeaderBlock);
 
-    // within the loop, the variable is defined equal to the phi node
-    // if it shadows an existing variable, we have to restore it
-    // so save it for now
+    // within the loop, the variable is defined equal to the PHI node.
+    // if it shadows an existing variable, we have to restore it,
+    // so save it now.
     auto oldVal = llvmTools.namedValues[varName];
-    llvmTools.namedValues[varName] = variable;
+    llvmTools.namedValues[varName] = alloca;
 
-    // emit the body of the loop.
-    // this can change the current block
-    // ignore value computed by the body, but dont allow an error
+    // emit the body of the loop. This, like any other expr, can change the current block.
+    // we ignore the value computed by the body, but don't allow an error
     if (!body->codeGen(llvmTools))
     {
         return nullptr;
     }
 
+    // emit the step value
     llvm::Value* stepValue = nullptr;
     if (step)
-    {        
+    {
         stepValue = step->codeGen(llvmTools);
         if (!stepValue)
         {
             return nullptr;
-        }
+        }        
     }
     else
-    {        
-        // if not specified, use 1.0
-        stepValue = llvm::ConstantFP::get(*context, llvm::APFloat(2.0));
+    {
+        stepValue = llvm::ConstantFP::get(*context, llvm::APFloat(1.0));
     }
 
-    auto nextVar = builder->CreateFAdd(variable, stepValue, "nextvar");
-
     // compute the end condition
-    auto endCond = end->codeGen(llvmTools);
-    if (!endCond)
+    auto endCondition = end->codeGen(llvmTools);
+    if (!endCondition)
     {
         return nullptr;
     }
 
+    // reload, increment, and restore the alloca.
+    // This handles the case where the body of the loop mutates the variable
+
+    auto currentVar = builder->CreateLoad(
+        alloca->getAllocatedType(), alloca, varName.c_str()
+    );
+    auto nextVar = builder->CreateFAdd(currentVar, stepValue, "nextvar");
+    builder->CreateStore(nextVar, alloca);
+
     // convert condition to bool
-    endCond = builder->CreateFCmpONE(
-        endCond, llvm::ConstantFP::get(*context, llvm::APFloat(0.0)), "loopcond"
+    endCondition = builder->CreateFCmpONE(
+        endCondition, llvm::ConstantFP::get(*context, llvm::APFloat(0.0)), "loopcond"
     );
 
-    // create the after loop block and insert it 
-    auto loopEndBlock = builder->GetInsertBlock();
-    auto afterBlock = llvm::BasicBlock::Create(*context, "afterloop", func);
+    // create after loop block and insert it 
+    auto afterLoopBlock = llvm::BasicBlock::Create(*context, "afterloop", func);
 
-    // insert the conditional branch into the end of loopEndBlock
-    builder->CreateCondBr(endCond, loopBlock, afterBlock);
+    // insert condition branch into the end of afterLoopBlock
+    builder->CreateCondBr(endCondition, loopBlock, afterLoopBlock);
 
-    // any new code will be inserted in afterBlock
-    builder->SetInsertPoint(afterBlock);
-
-    // add new entry point to the phi node
-    variable->addIncoming(nextVar, loopEndBlock);
+    // any new code will be inserted in afterLoopBlock
+    builder->SetInsertPoint(afterLoopBlock);
 
     // restore the unshadowed variable
     if (oldVal)
@@ -331,5 +426,6 @@ llvm::Value* ForExprAST::codeGen(kaleidoscope::LLVMTools& llvmTools)
         llvmTools.namedValues.erase(varName);
     }
 
+    // for expression returns 0
     return llvm::Constant::getNullValue(llvm::Type::getDoubleTy(*context));
 }

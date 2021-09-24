@@ -25,12 +25,18 @@ extern "C" DLLEXPORT double cuberoot(double x)
 
 int main()
 {
-    llvm::InitializeNativeTarget();
-    llvm::InitializeNativeTargetAsmPrinter();
-    llvm::InitializeNativeTargetAsmParser();
+    llvm::InitializeAllTargetInfos();
+    llvm::InitializeAllTargets();
+    llvm::InitializeAllTargetMCs();
+    llvm::InitializeAllAsmParsers();
+    llvm::InitializeAllAsmPrinters();
 
     fprintf(stderr, "ready> ");   
     
-    kaleidoscope::parser::Parser parser;    
-    parser.run();    
+    kaleidoscope::parser::Parser parser;   
+    parser.run();
+    if (parser.writeToFile())
+    {
+        fprintf(stderr, "Wrote to file succesfully.");
+    }
 }

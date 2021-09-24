@@ -25,6 +25,8 @@ namespace kaleidoscope
 
 			void run();
 
+			bool writeToFile();
+
             void printJitCode() { llvmTools.llvmModule->print(llvm::errs(), nullptr); }
 
             void initModuleAndPassManager();                                                   
@@ -85,6 +87,8 @@ namespace kaleidoscope
 
             // parses a for loop expression
             std::unique_ptr<kaleidoscope::ast::ExprAST> parseForExpr();
+
+			std::unique_ptr<kaleidoscope::ast::ExprAST> parseVarExpr();
 
 			int getTokPrecedence();			
 

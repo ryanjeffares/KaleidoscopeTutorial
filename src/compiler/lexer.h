@@ -22,7 +22,8 @@ namespace kaleidoscope
 			TOK_FOR = -9,
 			TOK_IN = -10,
 			TOK_UNARY = -11,
-			TOK_BINARY = -12
+			TOK_BINARY = -12,
+			TOK_VAR = -13
 		};
 
 		Lexer();
@@ -36,6 +37,8 @@ namespace kaleidoscope
 
 	private:
         
+		bool isValidIdentChar(int c);
+
 		int lastChar;
 		double numValue;
 		std::string identifierStr;

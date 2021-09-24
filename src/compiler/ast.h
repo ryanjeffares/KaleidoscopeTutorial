@@ -29,13 +29,31 @@ namespace kaleidoscope
             double value;
         };
 
+        // expression class for var/in 
+        class VarExprAST : public ExprAST
+        {
+        public:
+            VarExprAST(std::vector<std::pair<std::string, std::unique_ptr<ExprAST>>> vNames,
+                       std::unique_ptr<ExprAST> b
+                    ) 
+                    : varNames(std::move(vNames)), body(std::move(b)) {}
+                
+            llvm::Value* codeGen(kaleidoscope::LLVMTools&) override;
+            
+        private:
+            std::vector<std::pair<std::string, std::unique_ptr<ExprAST>>> varNames;
+            std::unique_ptr<ExprAST> body;
+        };
+
         // expression class for referencing a variable
         class VariableExprAST : public ExprAST
         {
         public:
             VariableExprAST(const std::string& n) : name(n) {}
 
-            llvm::Value* codeGen(kaleidoscope::LLVMTools&) override;  
+            llvm::Value* codeGen(kaleidoscope::LLVMTools&) override;
+
+            const std::string& getName() const { return name; }
 
         private:
             std::string name;
@@ -186,6 +204,20 @@ namespace kaleidoscope
             }
 
             return nullptr;
+        }
+
+        static llvm::AllocaInst* createEntryBlockAlloca(llvm::Function* func,
+                                                        const std::string& name,
+                                                        kaleidoscope::LLVMTools& llvmTools)
+        {
+            llvm::IRBuilder<> tempBuilder(&func->getEntryBlock(),
+                                          func->getEntryBlock().begin()
+            );
+            return tempBuilder.CreateAlloca(
+                llvm::Type::getDoubleTy(*(llvmTools.llvmContext)),
+                0, 
+                name.c_str()
+            );   
         }
     } // namespace ast    
 } // namespace kaleidoscope

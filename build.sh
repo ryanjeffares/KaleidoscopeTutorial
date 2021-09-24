@@ -1,1 +1,1 @@
-clang++ -g src/kaleidoscope.cpp src/compiler/parser.cpp src/compiler/lexer.cpp src/compiler/ast.cpp `llvm-config --cxxflags --ldflags --system-libs --libs core orcjit native` -O3 -v -o build/kaleidoscope && ./build/kaleidoscope
+clang++ -g src/kaleidoscope.cpp src/compiler/parser.cpp src/compiler/lexer.cpp src/compiler/ast.cpp `llvm-config --cxxflags --ldflags --system-libs --libs all` -O3 -frtti -v -o build/kaleidoscope && ./build/kaleidoscope
