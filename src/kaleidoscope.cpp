@@ -29,9 +29,7 @@ int main()
     llvm::InitializeAllTargets();
     llvm::InitializeAllTargetMCs();
     llvm::InitializeAllAsmParsers();
-    llvm::InitializeAllAsmPrinters();
-
-    fprintf(stderr, "ready> ");   
+    llvm::InitializeAllAsmPrinters();        
     
     kaleidoscope::parser::Parser parser;   
     parser.run();

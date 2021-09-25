@@ -212,6 +212,8 @@ llvm::Function* PrototypeAST::codeGen(kaleidoscope::LLVMTools& llvmTools)
     return func;
 }
 
+static llvm::DISubroutineType* createFunctionType(int numArgs, llvm::DIFile* unity);
+
 llvm::Function* FunctionAST::codeGen(kaleidoscope::LLVMTools& llvmTools,
                                      std::map<std::string, std::unique_ptr<PrototypeAST>>& functionProtos)
 {
@@ -237,6 +239,29 @@ llvm::Function* FunctionAST::codeGen(kaleidoscope::LLVMTools& llvmTools,
     // create a new basic block to start insertion into
     auto block = llvm::BasicBlock::Create(*(llvmTools.llvmContext), "entry", func);
     builder->SetInsertPoint(block);
+
+    // create a subprogram DIE for this function
+    auto& debugInfo = llvmTools.debugInfo;
+    llvm::DIFile* unit = debugInfo.diBuilder->createFile(
+        debugInfo.compileUnit->getFilename(),
+        debugInfo.compileUnit->getDirectory()
+    );
+
+    llvm::DIScope* fContext = unit;
+    int lineNumber = p.getLine();
+    int scopeLine = lineNumber;
+
+    llvm::DISubprogram* subProgram = debugInfo.diBuilder->createFunction(
+        fContext,
+        p.getName(),
+        llvm::StringRef(),
+        unit,
+        lineNumber,
+        createFunctionType(func->arg_size(), unit),
+        scopeLine,
+        llvm::DINode::FlagPrototyped,
+        llvm::DISubprogram::SPFlagDefinition
+    );
 
     // clear the map and record the function arguments there
     llvmTools.namedValues.clear();

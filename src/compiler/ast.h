@@ -4,6 +4,7 @@
 
 #include "includellvm.h"
 #include "llvmmodule.h"
+#include "lexer.h"
 
 namespace kaleidoscope
 {
@@ -13,8 +14,13 @@ namespace kaleidoscope
         class ExprAST
         {
         public:
+            // ExprAST(kaleidoscope::SourceLocation loc = )
             virtual ~ExprAST() = default;
+
             virtual llvm::Value* codeGen(kaleidoscope::LLVMTools&) = 0;
+
+        private:
+            kaleidoscope::SourceLocation location;
         };
 
         // expression class for numerical literals
@@ -66,8 +72,10 @@ namespace kaleidoscope
         public:
             PrototypeAST(const std::string& n, std::vector<std::string> a,
                          bool isOp = false, unsigned prec = 0)
-                         : name(n), args(std::move(a)), 
-                           isOperator(isOp), precedence(prec) {}
+                         : name(n), 
+                           args(std::move(a)), 
+                           isOperator(isOp), 
+                           precedence(prec) {}
 
             llvm::Function* codeGen(kaleidoscope::LLVMTools&);
 
@@ -83,11 +91,14 @@ namespace kaleidoscope
                 return name.back();
             }
 
+            int getLine() const { return line; }
+
         private:
             std::string name;
             std::vector<std::string> args;
             bool isOperator;
             unsigned precedence;
+            int line;
         };
 
         // expression class for binary operator

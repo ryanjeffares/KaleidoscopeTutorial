@@ -5,9 +5,15 @@
 
 namespace kaleidoscope
 {
+	struct SourceLocation
+	{
+		int line;
+		int column;
+	};
+
 	class Lexer
 	{
-	public:
+	public:		
 
 		enum Token
 		{
@@ -44,5 +50,8 @@ namespace kaleidoscope
 		std::string identifierStr;
 
 		std::map<std::string, Token> tokenLookup;
+
+		SourceLocation currentLocation;
+		SourceLocation lexerLocation = { 1, 0 };
 	};
 }

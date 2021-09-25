@@ -20,6 +20,7 @@ void Parser::run()
     getNextToken();    
     initModuleAndPassManager();
     mainLoop();
+    llvmTools.finalize();
 }
 
 bool Parser::writeToFile()
@@ -79,8 +80,7 @@ bool Parser::writeToFile()
 void Parser::mainLoop()
 {                
     while (true)
-    {
-        fprintf(stderr, "ready> ");
+    {        
         switch (currentToken)
         {
             case Lexer::Token::TOK_EOF:
@@ -110,12 +110,7 @@ void Parser::handleDefinition()
 {
     if (auto funcAst = parseDefinition())
     {
-        if (auto funcIr = funcAst->codeGen(llvmTools, functionProtos))
-        {
-            fprintf(stderr, "Read function definition: \n");
-            funcIr->print(llvm::errs());
-            fprintf(stderr, "\n");
-        }					
+        funcAst->codeGen(llvmTools, functionProtos);        	
     }
     else 
     {
@@ -127,13 +122,14 @@ void Parser::handleExtern()
 {
     if (auto funcAst = parseExtern())
     {
-        if (auto funcIr = funcAst->codeGen(llvmTools))
+        if (!funcAst->codeGen(llvmTools))
         {
-            fprintf(stderr, "Read extern: \n");
-            funcIr->print(llvm::errs());
-            fprintf(stderr, "\n");
-            functionProtos[funcAst->getName()] = std::move(funcAst);
+            fprintf(stderr, "Error reading extern.");         
         }					
+        else 
+        {
+            functionProtos[funcAst->getName()] = std::move(funcAst);
+        }
     }
     else
     {
@@ -145,7 +141,10 @@ void Parser::handleTopLevelExpression()
 {
     if (auto funcAst = parseTopLevelExpr())
     {
-        funcAst->codeGen(llvmTools, functionProtos);        
+        if (!funcAst->codeGen(llvmTools, functionProtos))
+        {
+            fprintf(stderr, "Error generating code for top level expression.");
+        } 
     }
     else 
     {
@@ -293,7 +292,7 @@ std::unique_ptr<FunctionAST> Parser::parseTopLevelExpr()
     if (auto e = parseExpression())
     {
         auto proto = std::make_unique<PrototypeAST>(
-            "__anon_expr", std::vector<std::string>()
+            "main", std::vector<std::string>()
         );
         return std::make_unique<FunctionAST>(
             std::move(proto), std::move(e), binopPrecedence
