@@ -5,6 +5,7 @@ using namespace kaleidoscope::ast;
 
 llvm::Value* NumberExprAST::codeGen(kaleidoscope::LLVMTools& llvmTools)
 {
+    llvmTools.emitLocation(this);
     return llvm::ConstantFP::get(*(llvmTools.llvmContext), llvm::APFloat(value));
 }
 
@@ -18,7 +19,7 @@ llvm::Value* VarExprAST::codeGen(kaleidoscope::LLVMTools& llvmTools)
     auto func = builder->GetInsertBlock()->getParent();
 
     // register all variables and emit their initializer
-    for (auto i = 0; i < varNames.size(); i++)
+    for (unsigned i = 0, e = varNames.size(); i != e; ++i)
     {
         const std::string& varName = varNames[i].first;
         auto init = varNames[i].second.get();
@@ -50,13 +51,15 @@ llvm::Value* VarExprAST::codeGen(kaleidoscope::LLVMTools& llvmTools)
         llvmTools.namedValues[varName] = alloca;
     }
 
+    llvmTools.emitLocation(this);
+
     auto bodyValue = body->codeGen(llvmTools);
     if (!bodyValue)
     {
         return nullptr;
     }
 
-    for (auto i = 0; i < varNames.size(); i++)
+    for (unsigned i = 0, e = varNames.size(); i != e; ++i)
     {
         llvmTools.namedValues[varNames[i].first] = oldBindings[i];
     }
@@ -71,6 +74,9 @@ llvm::Value* VariableExprAST::codeGen(kaleidoscope::LLVMTools& llvmTools)
     {
         logging::logErrorValue("Unknown variable name.");                        
     }
+
+    llvmTools.emitLocation(this);
+
     return llvmTools.irBuilder->CreateLoad(
         alloca->getAllocatedType(), alloca, name.c_str()
     );
@@ -78,6 +84,8 @@ llvm::Value* VariableExprAST::codeGen(kaleidoscope::LLVMTools& llvmTools)
 
 llvm::Value* BinaryExprAST::codeGen(kaleidoscope::LLVMTools& llvmTools) 
 {
+    llvmTools.emitLocation(this);
+
     auto& builder = llvmTools.irBuilder;
     auto& context = llvmTools.llvmContext;
 
@@ -166,11 +174,14 @@ llvm::Value* UnaryExprAST::codeGen(kaleidoscope::LLVMTools& llvmTools)
         return nullptr;
     }
 
+    llvmTools.emitLocation(this);
     return llvmTools.irBuilder->CreateCall(func, operandValue, "unop");
 }
 
 llvm::Value* CallExprAST::codeGen(kaleidoscope::LLVMTools& llvmTools)
 {    
+    llvmTools.emitLocation(this);
+    
     auto calleeFunc = findFunction(callee, llvmTools, protos);
     if (!calleeFunc)
     {
@@ -185,7 +196,7 @@ llvm::Value* CallExprAST::codeGen(kaleidoscope::LLVMTools& llvmTools)
     }
 
     std::vector<llvm::Value*> argsVec;
-    for (auto i = 0; i < args.size(); i++)
+    for (unsigned i = 0, e = args.size(); i != e; ++i)
     {
         argsVec.push_back(args[i]->codeGen(llvmTools));
         if (!argsVec.back())
@@ -211,8 +222,6 @@ llvm::Function* PrototypeAST::codeGen(kaleidoscope::LLVMTools& llvmTools)
 
     return func;
 }
-
-static llvm::DISubroutineType* createFunctionType(int numArgs, llvm::DIFile* unity);
 
 llvm::Function* FunctionAST::codeGen(kaleidoscope::LLVMTools& llvmTools,
                                      std::map<std::string, std::unique_ptr<PrototypeAST>>& functionProtos)
@@ -248,8 +257,8 @@ llvm::Function* FunctionAST::codeGen(kaleidoscope::LLVMTools& llvmTools,
     );
 
     llvm::DIScope* fContext = unit;
-    int lineNumber = p.getLine();
-    int scopeLine = lineNumber;
+    unsigned lineNumber = p.getLine();
+    unsigned scopeLine = lineNumber;
 
     llvm::DISubprogram* subProgram = debugInfo.diBuilder->createFunction(
         fContext,
@@ -257,25 +266,63 @@ llvm::Function* FunctionAST::codeGen(kaleidoscope::LLVMTools& llvmTools,
         llvm::StringRef(),
         unit,
         lineNumber,
-        createFunctionType(func->arg_size(), unit),
+        debugInfo.createFunctionType(func->arg_size(), unit),
         scopeLine,
         llvm::DINode::FlagPrototyped,
         llvm::DISubprogram::SPFlagDefinition
     );
+    func->setSubprogram(subProgram);
+
+    debugInfo.lexicalBlocks.push_back(subProgram);
+
+    // unset the location for the prologue emission
+    // leading instructions with no location in a function are 
+    // considered part of the prologue and the debugger
+    // will run past them when breaking on a function
+    llvmTools.emitLocation(nullptr);
 
     // clear the map and record the function arguments there
     llvmTools.namedValues.clear();
+    unsigned argIndex = 0;
     for (auto& arg : func->args())
     {
         auto alloca = createEntryBlockAlloca(func, std::string(arg.getName()), llvmTools);
+
+        llvm::DILocalVariable* d = debugInfo.diBuilder->createParameterVariable(
+            subProgram,
+            arg.getName(),
+            ++argIndex,
+            unit,
+            lineNumber,
+            debugInfo.getDoubleType(),
+            true
+        );
+        debugInfo.diBuilder->insertDeclare(
+            alloca,
+            d,
+            debugInfo.diBuilder->createExpression(),
+            llvm::DILocation::get(
+                subProgram->getContext(),
+                lineNumber,
+                0,
+                subProgram
+            ),
+            builder->GetInsertBlock()
+        );
+
         builder->CreateStore(&arg, alloca);
         llvmTools.namedValues[std::string(arg.getName())] = alloca;
     }
+
+    llvmTools.emitLocation(body.get());
 
     if (auto returnValue = body->codeGen(llvmTools))
     {
         // finish off the function and validate it
         builder->CreateRet(returnValue);
+        // pop off the lexical block for this function
+        debugInfo.lexicalBlocks.pop_back();
+        // validate the generated code
         llvm::verifyFunction(*func);                
         return func;
     }
@@ -288,11 +335,17 @@ llvm::Function* FunctionAST::codeGen(kaleidoscope::LLVMTools& llvmTools,
         binopPrecedence.erase(p.getOperatorName());
     }
 
-    return func;
+    // pop off the lexical block for the function
+    // since we added it unconditionally
+    debugInfo.lexicalBlocks.pop_back();
+
+    return nullptr;
 }
 
 llvm::Value* IfExprAST::codeGen(kaleidoscope::LLVMTools& llvmTools)
 {
+    llvmTools.emitLocation(this);
+
     auto condValue = condition->codeGen(llvmTools);
     if (!condValue)
     {
@@ -365,6 +418,8 @@ llvm::Value* ForExprAST::codeGen(kaleidoscope::LLVMTools& llvmTools)
 
     // create an alloca for the variable in the entry block
     auto alloca = createEntryBlockAlloca(func, varName, llvmTools);
+
+    llvmTools.emitLocation(this);
 
     // emit the start code first, without variable in scope
     auto startValue = start->codeGen(llvmTools);

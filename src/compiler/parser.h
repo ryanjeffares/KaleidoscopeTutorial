@@ -7,7 +7,7 @@
 
 #include "lexer.h"
 #include "logging.h"
-#include "llvmmodule.h"
+#include "llvmtools.h"
 #include "ast.h"
 #include "../../include/KaleidoscopeJIT.h"
 
@@ -20,16 +20,18 @@ namespace kaleidoscope
 		{
 		public:            
 
-			Parser();
+			Parser(const std::string& inFileName, const std::string& outFileName);
 			~Parser() = default;		
 
 			void run();
+
+			void finalize();
 
 			bool writeToFile();
 
             void printJitCode() { llvmTools.llvmModule->print(llvm::errs(), nullptr); }
 
-            void initModuleAndPassManager();                                                   
+            void initModuleAndPassManager(const std::string& outFileName);
                         
 		private:						                        
 
@@ -94,8 +96,9 @@ namespace kaleidoscope
 
 		private:
 
+			std::string outFileName;
 			int currentToken;
-			Lexer lexer;            
+			Lexer lexer;
             kaleidoscope::LLVMTools llvmTools;
 
             llvm::ExitOnError exitOnError;   

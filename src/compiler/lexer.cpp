@@ -2,7 +2,10 @@
 
 using namespace kaleidoscope;
 
-Lexer::Lexer() : lastChar(' ')
+SourceLocation Lexer::currentLocation(0, 0);
+
+Lexer::Lexer(const std::string& inFileName) 
+    : lastChar(' '), lexerLocation(1, 0)
 {
     tokenLookup["def"] = Token::TOK_DEF;
     tokenLookup["extern"] = Token::TOK_EXTERN;
@@ -13,7 +16,7 @@ Lexer::Lexer() : lastChar(' ')
     tokenLookup["in"] = Token::TOK_IN;
     tokenLookup["unary"] = Token::TOK_UNARY;
     tokenLookup["binary"] = Token::TOK_BINARY;
-    tokenLookup["var"] = Token::TOK_VAR;
+    tokenLookup["var"] = Token::TOK_VAR; 
 }
 
 int Lexer::getToken()
@@ -21,8 +24,10 @@ int Lexer::getToken()
     // skip whitespace
     while (isspace(lastChar))
     {
-        lastChar = getchar();
+        lastChar = advance();
     }
+
+    currentLocation = lexerLocation;
 
     // if the character is in the alphabet
     if (isalpha(lastChar))
@@ -30,7 +35,7 @@ int Lexer::getToken()
         // set our identifier to this char, and then append following chars until 
         // the next char is not alphanumeric
         identifierStr = lastChar;
-        while (isValidIdentChar((lastChar = getchar())))
+        while (isValidIdentChar((lastChar = advance())))
         {
             identifierStr += lastChar;
         }
@@ -54,7 +59,7 @@ int Lexer::getToken()
         do
         {
             numStr += lastChar;
-            lastChar = getchar();                    
+            lastChar = getchar();
         } while (isdigit(lastChar) || lastChar == '.');
 
         numValue = strtod(numStr.c_str(), nullptr);
@@ -66,7 +71,7 @@ int Lexer::getToken()
     {
         do
         {
-            lastChar = getchar();
+            lastChar = advance();
         } while (lastChar != EOF && lastChar != '\n' && lastChar != '\r');
 
         if (lastChar != EOF)
@@ -83,8 +88,25 @@ int Lexer::getToken()
 
     // otherwise just return the char as its ascii value
     int thisChar = lastChar;
-    lastChar = getchar();
+    lastChar = advance();
     return thisChar;
+}
+
+int Lexer::advance()
+{
+    int currentChar = getchar();
+
+    if (currentChar == '\n' || currentChar == '\r')
+    {
+        lexerLocation.line++;
+        lexerLocation.column = 0;
+    }
+    else 
+    {
+        lexerLocation.column++;
+    }
+
+    return currentChar;
 }
 
 bool Lexer::isValidIdentChar(int c)

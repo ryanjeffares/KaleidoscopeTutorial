@@ -1,18 +1,37 @@
 #include "ast.h"
-#include "debuginfo.h"
+#include "llvmtools.h"
 
-using namespace kaleidoscope::debug;
+using namespace kaleidoscope;
 
-void DebugInfo::init(llvm::Module& module)
+void DebugInfo::init(llvm::Module& module, const std::string& outFileName)
 {
     diBuilder = std::make_unique<llvm::DIBuilder>(module);
     compileUnit = diBuilder->createCompileUnit(
         llvm::dwarf::DW_LANG_C,
-        diBuilder->createFile("fib.ks", "."),
+        diBuilder->createFile(outFileName, "."),
         "Kaleidoscope Compiler",
         0,
         "",
         0
+    );
+}
+
+void DebugInfo::emitLocation(ast::ExprAST* ast, llvm::IRBuilder<>& irBuilder)
+{
+    if (!ast)
+    {
+        return irBuilder.SetCurrentDebugLocation(llvm::DebugLoc());
+    }
+
+    llvm::DIScope* scope = lexicalBlocks.empty() ? compileUnit : lexicalBlocks.back();
+
+    irBuilder.SetCurrentDebugLocation(
+        llvm::DILocation::get(
+            scope->getContext(),
+            ast->getLine(),
+            ast->getColumn(),
+            scope
+        )
     );
 }
 
@@ -29,25 +48,19 @@ llvm::DIType* DebugInfo::getDoubleType()
     return doubleType;
 }
 
-void DebugInfo::emitLocation(ExprAST* ast, kaleidoscope::LLVMTools& llvmTools)
+llvm::DISubroutineType* DebugInfo::createFunctionType(unsigned numArgs, llvm::DIFile* unit)
 {
-    llvm::DIScope* scope;
+    llvm::SmallVector<llvm::Metadata*, 8> eltTypes;
+    llvm::DIType* doubleType = getDoubleType();
 
-    if (lexicalBlocks.empty())
+    eltTypes.push_back(doubleType);
+
+    for (unsigned i = 0, e = numArgs; i != e; ++i)
     {
-        scope = compileUnit;        
-    }
-    else
-    {
-        scope = lexicalBlocks.back();
+        eltTypes.push_back(doubleType);
     }
 
-    llvmTools.irBuilder->SetCurrentDebugLocation(
-        llvm::DILocation::get(
-            scope->getContext(),
-            ast->getLine(),
-            ast->getCol(),
-            scope
-        )
+    return diBuilder->createSubroutineType(
+        diBuilder->getOrCreateTypeArray(eltTypes)
     );
 }

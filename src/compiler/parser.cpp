@@ -3,9 +3,11 @@
 using namespace kaleidoscope::parser;
 using namespace kaleidoscope::ast;
 
-Parser::Parser()
-{
+Parser::Parser(const std::string& inFileName, const std::string& outFName) 
+    : lexer(inFileName), outFileName(outFName)
+{    
     kaleidoscopeJit = exitOnError(llvm::orc::KaleidoscopeJIT::Create());  
+
     binopPrecedence['='] = 2;  
     binopPrecedence['<'] = 10;
     binopPrecedence['>'] = 10;    
@@ -13,14 +15,24 @@ Parser::Parser()
     binopPrecedence['-'] = 20;    
     binopPrecedence['*'] = 30;
     binopPrecedence['/'] = 30;
+    
+    initModuleAndPassManager(outFileName);
 }	
 
 void Parser::run()
 {
     getNextToken();    
-    initModuleAndPassManager();
-    mainLoop();
-    llvmTools.finalize();
+    mainLoop();    
+}
+
+void Parser::finalize()
+{
+    llvmTools.debugInfo.diBuilder->finalize();
+
+    std::error_code errorCode;
+    llvm::raw_fd_ostream out(outFileName, errorCode, llvm::sys::fs::OF_None);
+    llvmTools.llvmModule->print(out, nullptr);
+    out.close();
 }
 
 bool Parser::writeToFile()
@@ -101,16 +113,19 @@ void Parser::mainLoop()
     }
 }
 
-void Parser::initModuleAndPassManager()
+void Parser::initModuleAndPassManager(const std::string& outFileName)
 {
-    llvmTools.doInit();
+    llvmTools.doInit(kaleidoscopeJit.get(), outFileName);
 }
 
 void Parser::handleDefinition()
 {
     if (auto funcAst = parseDefinition())
     {
-        funcAst->codeGen(llvmTools, functionProtos);        	
+        if (!funcAst->codeGen(llvmTools, functionProtos))
+        {
+            fprintf(stderr, "Error reading function definition:");
+        }
     }
     else 
     {
@@ -177,6 +192,7 @@ std::unique_ptr<ExprAST> Parser::parsePrimary()
 std::unique_ptr<PrototypeAST> Parser::parsePrototype()
 {
     std::string funcName;
+    kaleidoscope::SourceLocation funcLocation = Lexer::currentLocation;
     unsigned kind = 0; // 0=ident, 1=unary, 2=binary
     unsigned binaryPrecedence = 30;
 
@@ -187,6 +203,7 @@ std::unique_ptr<PrototypeAST> Parser::parsePrototype()
             kind = 0;
             getNextToken();
             break;
+
         case Lexer::Token::TOK_BINARY:
             getNextToken();
             if (!isascii(currentToken))
@@ -212,6 +229,7 @@ std::unique_ptr<PrototypeAST> Parser::parsePrototype()
                 getNextToken();
             }
             break;
+
         case Lexer::Token::TOK_UNARY:
             getNextToken();
             if (!isascii(currentToken))
@@ -224,6 +242,7 @@ std::unique_ptr<PrototypeAST> Parser::parsePrototype()
             kind = 1;
             getNextToken();
             break;
+
         default:
             logging::logErrorProto("Expected function name in prototype.");
             return nullptr;
@@ -256,7 +275,7 @@ std::unique_ptr<PrototypeAST> Parser::parsePrototype()
     }
 
     return std::make_unique<PrototypeAST>(
-        funcName, argNames, kind != 0, binaryPrecedence
+        funcLocation, funcName, argNames, kind != 0, binaryPrecedence
     );
 }
             
@@ -289,10 +308,12 @@ std::unique_ptr<PrototypeAST> Parser::parseExtern()
 
 std::unique_ptr<FunctionAST> Parser::parseTopLevelExpr()
 {
+    kaleidoscope::SourceLocation funcLocation = Lexer::currentLocation;
+
     if (auto e = parseExpression())
     {
         auto proto = std::make_unique<PrototypeAST>(
-            "main", std::vector<std::string>()
+            funcLocation, "main", std::vector<std::string>()
         );
         return std::make_unique<FunctionAST>(
             std::move(proto), std::move(e), binopPrecedence
@@ -328,6 +349,9 @@ std::unique_ptr<ExprAST> Parser::parseBinOpRhs(int exprPrec, std::unique_ptr<Exp
 
         // we know this is a binop
         int binOp = currentToken;
+
+        kaleidoscope::SourceLocation binLocation = Lexer::currentLocation;
+
         // eat binop
         getNextToken();
 
@@ -351,7 +375,7 @@ std::unique_ptr<ExprAST> Parser::parseBinOpRhs(int exprPrec, std::unique_ptr<Exp
 
         // merge lhs/rhs
         lhs = std::make_unique<BinaryExprAST>(
-            binOp, std::move(lhs), std::move(rhs), functionProtos
+            binLocation, binOp, std::move(lhs), std::move(rhs), functionProtos
         );
     }
 }
@@ -369,7 +393,9 @@ std::unique_ptr<ExprAST> Parser::parseUnary()
     getNextToken();
     if (auto operand = parseUnary())
     {
-        return std::make_unique<UnaryExprAST>(opcode, std::move(operand), functionProtos);
+        return std::make_unique<UnaryExprAST>(
+            opcode, std::move(operand), functionProtos
+        );
     }
 
     return nullptr;
@@ -379,13 +405,16 @@ std::unique_ptr<ExprAST> Parser::parseUnary()
 std::unique_ptr<ExprAST> Parser::parseIdentifierExpr()
 {
     std::string idName = lexer.getIdentStr();
+
+    kaleidoscope::SourceLocation identifierLocation = Lexer::currentLocation;
+
     // eat the identifier
     getNextToken();
 
     // simple variable reference
     if (currentToken != '(')
     {
-        return std::make_unique<VariableExprAST>(idName);
+        return std::make_unique<VariableExprAST>(identifierLocation, idName);
     }
 
     // eat the token
@@ -421,7 +450,10 @@ std::unique_ptr<ExprAST> Parser::parseIdentifierExpr()
 
     // eat the ')'
     getNextToken();
-    return std::make_unique<CallExprAST>(idName, std::move(args), functionProtos);
+
+    return std::make_unique<CallExprAST>(
+        identifierLocation, idName, std::move(args), functionProtos
+    );
 }
             
 // call when current token is a number. 
@@ -454,6 +486,8 @@ std::unique_ptr<ExprAST> Parser::parseParenExpr()
 
 std::unique_ptr<ExprAST> Parser::parseIfExpr()
 {
+    kaleidoscope::SourceLocation ifLocation = Lexer::currentLocation;
+
     // eat the if
     getNextToken();
 
@@ -496,8 +530,9 @@ std::unique_ptr<ExprAST> Parser::parseIfExpr()
         return nullptr;
     }
 
-    return std::make_unique<IfExprAST>(std::move(condition), std::move(thenExpr), 
-                                       std::move(elseExpr));
+    return std::make_unique<IfExprAST>(
+        ifLocation, std::move(condition), std::move(thenExpr), std::move(elseExpr)
+    );
 }
 
 std::unique_ptr<ExprAST> Parser::parseForExpr()
@@ -570,8 +605,9 @@ std::unique_ptr<ExprAST> Parser::parseForExpr()
         return nullptr;
     }
 
-    return std::make_unique<ForExprAST>(idName, std::move(start), std::move(end), 
-                                        std::move(step), std::move(body));
+    return std::make_unique<ForExprAST>(
+        idName, std::move(start), std::move(end), std::move(step), std::move(body)
+    );
 }
 
 std::unique_ptr<ExprAST> Parser::parseVarExpr()

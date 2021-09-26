@@ -2,11 +2,16 @@
 
 #include <string>
 #include <map>
+#include <fstream>
+#include <cassert>
 
 namespace kaleidoscope
 {
 	struct SourceLocation
 	{
+		SourceLocation(int l, int c) 
+			: line(l), column(c) {}
+		
 		int line;
 		int column;
 	};
@@ -32,7 +37,7 @@ namespace kaleidoscope
 			TOK_VAR = -13
 		};
 
-		Lexer();
+		Lexer(const std::string& file);
 		~Lexer() = default;
 
 	    int getToken();
@@ -41,17 +46,19 @@ namespace kaleidoscope
 
         const std::string& getIdentStr() const { return identifierStr; }
 
+		static SourceLocation currentLocation;
+
 	private:
         
+		int advance();
 		bool isValidIdentChar(int c);
 
 		int lastChar;
 		double numValue;
-		std::string identifierStr;
+		std::string identifierStr;		
 
 		std::map<std::string, Token> tokenLookup;
 
-		SourceLocation currentLocation;
-		SourceLocation lexerLocation = { 1, 0 };
+		SourceLocation lexerLocation;
 	};
 }
